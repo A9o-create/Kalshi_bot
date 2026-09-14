@@ -20,7 +20,12 @@ def _get_connection():
     if not url:
         return None
     import psycopg2
-    return psycopg2.connect(url)
+    # Explicit sslmode=require rather than trusting psycopg2's default
+    # ("prefer"). Render's Postgres enforces SSL, and we've directly
+    # observed a related tool fail with "SSL/TLS required" -- forcing it
+    # here removes any ambiguity about whether the bot's own writes would
+    # hit the same wall, rather than assuming the default behaves correctly.
+    return psycopg2.connect(url, sslmode="require")
 
 
 def ensure_table():
