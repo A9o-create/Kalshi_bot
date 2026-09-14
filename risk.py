@@ -35,6 +35,20 @@ def cap_size_by_depth(size_dollars: float, price_cents: float, available_contrac
         return size_dollars
     depth_cap_dollars = available_contracts * max_depth_fraction * (price_cents / 100.0)
     return min(size_dollars, depth_cap_dollars)
+
+
+def entry_favorability_multiplier(side_price_cents: float) -> float:
+    """
+    side_price_cents = the price actually paid for the side being bought
+    (not necessarily the raw YES price -- for a NO position it's 100 minus
+    that). Boosts sizing when the entry falls in the 35-50c "sweet spot":
+    meaningfully cheaper fees than a 50c coin flip, while avoiding the
+    illiquidity of deep longshots below 35c. Multiplier only, never a hard
+    gate -- entries outside the band still size normally, just smaller.
+    """
+    if config.FAVORABLE_ENTRY_PRICE_MIN_CENTS <= side_price_cents <= config.FAVORABLE_ENTRY_PRICE_MAX_CENTS:
+        return config.FAVORABLE_ENTRY_SIZE_MULTIPLIER
+    return 1.0
     """
     side_price_cents = the price actually paid for the side being bought
     (not necessarily the raw YES price -- for a NO position it's 100 minus
