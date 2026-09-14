@@ -172,7 +172,7 @@ def run():
                     )
                     size = _apply_depth_cap(ticker, sig.direction, side_price, size)
                     if size > 0:
-                        broker.open_position(ticker, event_ticker, sig.direction, current_price, size, sig.reason, strategy="momentum")
+                        broker.open_position(ticker, event_ticker, sig.direction, current_price, size, sig.reason, strategy="momentum", market_title=m.get("title", ticker))
 
         # --- Leg 2: tennis mean reversion, Leg 3: tennis value entry ---
         for series in config.TENNIS_SERIES:
@@ -213,7 +213,7 @@ def run():
                     )
                     size = _apply_depth_cap(ticker, sig.direction, side_price, size)
                     if size > 0:
-                        broker.open_position(ticker, event_ticker, sig.direction, current_price, size, sig.reason, strategy="reversion")
+                        broker.open_position(ticker, event_ticker, sig.direction, current_price, size, sig.reason, strategy="reversion", market_title=m.get("title", ticker))
                     continue  # don't also try leg 3 on a market we just entered via leg 2
 
                 # Leg 3: value entry (early match, buy the cheap side)
@@ -230,7 +230,7 @@ def run():
                     size = risk.position_size_dollars(broker.balance, win_prob, win_cents, loss_cents, side_price_cents=side_price)
                     size = _apply_depth_cap(ticker, sig.direction, side_price, size)
                     if size > 0:
-                        broker.open_position(ticker, event_ticker, sig.direction, current_price, size, sig.reason, strategy="value_entry")
+                        broker.open_position(ticker, event_ticker, sig.direction, current_price, size, sig.reason, strategy="value_entry", market_title=m.get("title", ticker))
 
         open_count = broker.get_open_position_count()
         print(f"[cycle done] balance=${broker.balance:.2f} open_positions={open_count}")

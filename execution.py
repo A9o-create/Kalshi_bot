@@ -50,6 +50,7 @@ class Position:
     opened_ts: float
     reason: str
     strategy: str = ""                       # "momentum" | "reversion" | "value_entry" -- picks the exit rule
+    market_title: str = ""                   # human-readable match/market name, from Kalshi's own "title" field
     order_id: Optional[str] = None          # live mode only
     requested_contracts: int = 0             # live mode only: what we asked for
     filled_contracts: int = 0                # live mode only: what actually filled
@@ -100,7 +101,7 @@ class PaperBroker:
             return quoted_price_cents, True
         return self._simulated_fill_price(quoted_price_cents, direction, is_buy), False
 
-    def open_position(self, ticker: str, event_ticker: str, direction: str, price_cents: float, size_dollars: float, reason: str, strategy: str = "") -> Position:
+    def open_position(self, ticker: str, event_ticker: str, direction: str, price_cents: float, size_dollars: float, reason: str, strategy: str = "", market_title: str = "") -> Position:
         fill_price, was_maker = self._simulate_execution(price_cents, direction, is_buy=True)
         contracts = max(1, int(size_dollars / (fill_price / 100.0)))
         fee = kalshi_maker_fee_dollars(contracts, fill_price) if was_maker else kalshi_taker_fee_dollars(contracts, fill_price)
@@ -116,10 +117,11 @@ class PaperBroker:
             opened_ts=time.time(),
             reason=reason,
             strategy=strategy,
+            market_title=market_title,
             filled_contracts=contracts,
         )
         self.open_positions[ticker] = pos
-        self._log({"action": "open", "ticker": ticker, "strategy": strategy, "direction": direction,
+        self._log({"action": "open", "ticker": ticker, "strategy": strategy, "market_title": market_title, "direction": direction,
                    "quoted_price_cents": price_cents, "fill_price_cents": fill_price,
                    "was_maker": was_maker, "size_dollars": size_dollars, "fee_dollars": fee, "reason": reason})
         return pos
@@ -142,7 +144,7 @@ class PaperBroker:
         self.balance += pnl_dollars
         self.daily_pnl += pnl_dollars
         self.total_fees_paid += fee
-        self._log({"action": "close", "ticker": ticker, "strategy": pos.strategy, "direction": pos.direction,
+        self._log({"action": "close", "ticker": ticker, "strategy": pos.strategy, "market_title": pos.market_title, "direction": pos.direction,
                    "quoted_exit_price_cents": exit_price_cents,
                    "fill_price_cents": fill_price, "was_maker": was_maker, "fee_dollars": fee,
                    "pnl_dollars": round(pnl_dollars, 2), "balance_after": round(self.balance, 2)})
@@ -362,7 +364,7 @@ class KalshiLiveBroker:
 
     # --- trading ---
 
-    def open_position(self, ticker: str, event_ticker: str, direction: str, price_cents: float, size_dollars: float, reason: str, strategy: str = "") -> Optional[Position]:
+    def open_position(self, ticker: str, event_ticker: str, direction: str, price_cents: float, size_dollars: float, reason: str, strategy: str = "", market_title: str = "") -> Optional[Position]:
         """
         Fetches the current best bid (fast, single GET) to price a maker
         attempt, reserves the position placeholder immediately, then hands
@@ -385,7 +387,7 @@ class KalshiLiveBroker:
         pos = Position(
             ticker=ticker, event_ticker=event_ticker, direction=direction,
             entry_price_cents=price_cents, size_dollars=0.0,
-            opened_ts=time.time(), reason=reason, strategy=strategy,
+            opened_ts=time.time(), reason=reason, strategy=strategy, market_title=market_title,
             requested_contracts=requested_contracts, filled_contracts=0,
             status="pending_fill",
         )

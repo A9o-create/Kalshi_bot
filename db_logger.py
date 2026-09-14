@@ -44,6 +44,7 @@ def ensure_table():
                     action TEXT NOT NULL,
                     ticker TEXT NOT NULL,
                     strategy TEXT,
+                    market_title TEXT,
                     direction TEXT,
                     quoted_price_cents DOUBLE PRECISION,
                     fill_price_cents DOUBLE PRECISION,
@@ -55,6 +56,9 @@ def ensure_table():
                     reason TEXT
                 )
             """)
+            # idempotent migration for tables created before market_title existed --
+            # ADD COLUMN IF NOT EXISTS never touches existing rows
+            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS market_title TEXT")
         _table_ready = True
     finally:
         conn.close()
@@ -74,16 +78,17 @@ def log_trade(record: dict):
         ensure_table()
         with conn, conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO trades (action, ticker, strategy, direction, quoted_price_cents,
+                INSERT INTO trades (action, ticker, strategy, market_title, direction, quoted_price_cents,
                     fill_price_cents, was_maker, size_dollars, fee_dollars, pnl_dollars,
                     balance_after, reason)
-                VALUES (%(action)s, %(ticker)s, %(strategy)s, %(direction)s, %(quoted_price_cents)s,
+                VALUES (%(action)s, %(ticker)s, %(strategy)s, %(market_title)s, %(direction)s, %(quoted_price_cents)s,
                     %(fill_price_cents)s, %(was_maker)s, %(size_dollars)s, %(fee_dollars)s,
                     %(pnl_dollars)s, %(balance_after)s, %(reason)s)
             """, {
                 "action": record.get("action"),
                 "ticker": record.get("ticker"),
                 "strategy": record.get("strategy"),
+                "market_title": record.get("market_title"),
                 "direction": record.get("direction"),
                 "quoted_price_cents": record.get("quoted_price_cents") or record.get("quoted_exit_price_cents"),
                 "fill_price_cents": record.get("fill_price_cents"),
