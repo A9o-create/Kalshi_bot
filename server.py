@@ -20,19 +20,30 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import live_paper_runner
 
+bot_thread = None  # module-level so the health handler can check its liveness
+
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
+        # Reflect whether the bot thread is actually still running, not just
+        # whether this process is up -- a thread that exits silently (e.g.
+        # via an uncaught sys.exit() inside it) doesn't kill the process, so
+        # a naive always-200 health check would keep reporting "live" even
+        # after the bot stopped doing anything. That's exactly what happened
+        # here: config.ENVIRONMENT wasn't reading the env var, the trading
+        # loop exited immediately, and the health check never caught it.
+        alive = bot_thread is not None and bot_thread.is_alive()
+        self.send_response(200 if alive else 503)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"ok")
+        self.wfile.write(b"ok" if alive else b"bot thread is not running")
 
     def log_message(self, format, *args):
         pass  # keep Render's log output focused on the bot, not health-check noise
 
 
 def main():
+    global bot_thread
     bot_thread = threading.Thread(target=live_paper_runner.run, daemon=True)
     bot_thread.start()
 

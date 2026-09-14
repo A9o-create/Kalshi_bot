@@ -12,7 +12,9 @@ Start at "backtest", move to "paper_prod" once signal logic is validated,
 only move to "live_prod" after you've watched paper_prod run and agree with its calls.
 """
 
-ENVIRONMENT = "backtest"  # "backtest" | "paper_prod" | "live_prod"
+import os
+
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "backtest")  # "backtest" | "paper_prod" | "live_prod"
 
 # --- Kalshi API (only used in paper_prod / live_prod) ---
 # Verified against docs.kalshi.com (Sep 2026). Market data (markets/trades/
