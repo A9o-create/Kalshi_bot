@@ -25,6 +25,12 @@ CANDLE_LOOKBACK_MINUTES = 40  # need 35 for momentum detector, pad a bit
 
 _running = True
 
+# Live status snapshot, updated once per cycle. server.py's HTTP handler reads
+# this directly -- exposing real-time bot state over HTTP without depending
+# on the database at all, which sidesteps Render's broken query tool entirely
+# for anything that doesn't need trade history specifically.
+latest_status = {"balance": None, "open_positions": None, "last_cycle_ts": None, "environment": None}
+
 
 def _handle_shutdown(sig, frame):
     global _running
@@ -226,7 +232,12 @@ def run():
                     if size > 0:
                         broker.open_position(ticker, event_ticker, sig.direction, current_price, size, sig.reason, strategy="value_entry")
 
-        print(f"[cycle done] balance=${broker.balance:.2f} open_positions={broker.get_open_position_count()}")
+        open_count = broker.get_open_position_count()
+        print(f"[cycle done] balance=${broker.balance:.2f} open_positions={open_count}")
+        latest_status["balance"] = round(broker.balance, 2)
+        latest_status["open_positions"] = open_count
+        latest_status["last_cycle_ts"] = time.time()
+        latest_status["environment"] = config.ENVIRONMENT
         time.sleep(POLL_INTERVAL_SECONDS)
 
     print(f"Stopped. Final balance: ${broker.balance:.2f}, open positions: {broker.get_open_position_count()}")

@@ -15,16 +15,26 @@ Start command on Render: python server.py
 """
 
 import os
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import live_paper_runner
+import db_logger
 
 bot_thread = None  # module-level so the health handler can check its liveness
 
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/status":
+            self._handle_status()
+        elif self.path.startswith("/trades"):
+            self._handle_trades()
+        else:
+            self._handle_health()
+
+    def _handle_health(self):
         # Reflect whether the bot thread is actually still running, not just
         # whether this process is up -- a thread that exits silently (e.g.
         # via an uncaught sys.exit() inside it) doesn't kill the process, so
@@ -37,6 +47,44 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"ok" if alive else b"bot thread is not running")
+
+    def _handle_status(self):
+        """
+        Live in-memory bot state, no database involved at all -- this is the
+        most reliable way to check on the bot, since it can't be broken by
+        any database connectivity issue on either end.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(live_paper_runner.latest_status).encode())
+
+    def _handle_trades(self):
+        """
+        Queries the trades table directly using the app's own psycopg2
+        connection (sslmode=require, the same path that's been used for
+        every successful write) -- bypassing Render's query tool, which has
+        an unrelated SSL negotiation bug on its own connection path.
+        """
+        try:
+            conn = db_logger._get_connection()
+            if conn is None:
+                raise RuntimeError("DATABASE_URL not set")
+            with conn, conn.cursor() as cur:
+                cur.execute("SELECT * FROM trades ORDER BY ts DESC LIMIT 50")
+                columns = [desc[0] for desc in cur.description]
+                rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+            conn.close()
+            body = json.dumps(rows, default=str).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(e)}).encode())
 
     def log_message(self, format, *args):
         pass  # keep Render's log output focused on the bot, not health-check noise
