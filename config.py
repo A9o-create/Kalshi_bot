@@ -29,7 +29,13 @@ KALSHI_PRIVATE_KEY_PATH_ENV = "KALSHI_PRIVATE_KEY_PATH"
 
 # --- Universe ---
 CRYPTO_SERIES = ["KXBTCD", "KXBTC", "KXETHD", "KXETH"]
-TENNIS_SERIES = ["KXATPMATCH", "KXWTAMATCH"]
+# KXITFWMATCH confirmed live/active against Kalshi's real market data.
+# KXITFMMATCH (men's) follows the same naming convention as the confirmed
+# tickers (KXATPMATCH/KXWTAMATCH -> KXITFWMATCH for women) but is INFERRED,
+# not independently verified. If wrong, it fails soft: get_markets() for an
+# invalid series just returns empty/errors, which the runner already logs
+# as a [warn] and skips -- watch the first few poll cycles' logs to confirm.
+TENNIS_SERIES = ["KXATPMATCH", "KXWTAMATCH", "KXITFWMATCH", "KXITFMMATCH"]
 
 # --- Leg 1: Crypto momentum ---
 MOMENTUM_VOLUME_SPIKE_MULTIPLE = 3.0     # current 5-min volume vs trailing 30-min avg
