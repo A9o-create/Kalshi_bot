@@ -12,6 +12,7 @@ nothing bad happens.
 import time
 import signal as os_signal
 import sys
+import threading
 
 import config
 import signals
@@ -67,7 +68,11 @@ def run():
     # once its position closes, so the same market can be re-entered later.
     already_signaled_events: set[str] = set()
 
-    os_signal.signal(os_signal.SIGINT, _handle_shutdown)
+    # signal.signal() only works in the main thread -- when server.py runs
+    # this inside a background thread (the Render deployment path), skip it
+    # entirely. Ctrl+C handling only matters for direct/tmux use anyway.
+    if threading.current_thread() is threading.main_thread():
+        os_signal.signal(os_signal.SIGINT, _handle_shutdown)
 
     while _running:
         if risk.daily_loss_breached(broker.daily_pnl, broker.starting_balance):
