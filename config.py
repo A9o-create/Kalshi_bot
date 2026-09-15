@@ -83,6 +83,25 @@ DAILY_LOSS_CAP_PCT = 0.10                # halt bot for the day if breached
 MAX_CONCURRENT_POSITIONS = 5
 MAX_POSITIONS_PER_EVENT = 1
 
+# --- Kalshi request pacing / 429 handling ---
+# Kalshi's public endpoints have been getting rate-limited heavily during
+# heavy-scan cycles (multiple series x multiple markets x candlesticks/trades
+# each, with no spacing between requests). This enforces a minimum interval
+# between consecutive requests, and retries 429s with backoff instead of
+# giving up on the first one.
+KALSHI_MIN_REQUEST_INTERVAL_SECONDS = 0.15   # caps request rate to ~6-7/sec
+KALSHI_MAX_429_RETRIES = 2                    # up to 3 total attempts per call
+KALSHI_BACKOFF_BASE_SECONDS = 1.0             # doubles each retry (1s, 2s, ...)
+KALSHI_BACKOFF_JITTER_SECONDS = 0.5           # randomized, avoids thundering-herd retries
+
+# --- Optional: restrict trading to markets matching specific player(s) ---
+# When set, every leg only considers markets whose "title" field contains
+# ANY of these strings (case-insensitive) -- e.g. specific players' surnames.
+# Also meaningfully reduces API call volume per cycle (fewer per-market
+# candlestick/trade-history lookups), which helps with Kalshi's rate limits.
+# Leave empty list/None to scan everything, as before.
+TARGET_MARKET_TITLE_FILTER = ["Baptiste", "Townsend", "Gauff"]
+
 # --- Paper trading starting balance (backtest & paper_prod only) ---
 PAPER_STARTING_BALANCE_DOLLARS = 1000.0
 # Paper mode otherwise assumes a perfect fill at the quoted price. This adds

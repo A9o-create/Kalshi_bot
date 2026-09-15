@@ -45,7 +45,19 @@ def _market_age_seconds(trades: list) -> float:
     return time.time() - trades[0]["ts"]
 
 
-def _apply_depth_cap(ticker: str, direction: str, side_price: float, size: float) -> float:
+def _apply_title_filter(markets: list) -> list:
+    """
+    If config.TARGET_MARKET_TITLE_FILTER is set (a list of strings), keeps
+    only markets whose title contains ANY of them (case-insensitive) --
+    e.g. a list of specific players' surnames. Applied right after
+    get_markets(), before any per-market candlestick/trade-history calls --
+    so this also directly cuts API call volume, not just which markets get
+    traded.
+    """
+    if not config.TARGET_MARKET_TITLE_FILTER:
+        return markets
+    needles = [n.lower() for n in config.TARGET_MARKET_TITLE_FILTER]
+    return [m for m in markets if any(n in (m.get("title") or "").lower() for n in needles)]
     """
     Fetches the orderbook and caps `size` to MAX_BOOK_DEPTH_FRACTION of the
     liquidity actually resting at the entry price level, so a capped-Kelly
@@ -137,7 +149,7 @@ def run():
         # --- Leg 1: crypto momentum ---
         for series in config.CRYPTO_SERIES:
             try:
-                markets = kmd.get_markets(series, status="open", limit=10)
+                markets = _apply_title_filter(kmd.get_markets(series, status="open", limit=10))
             except Exception as e:
                 print(f"[warn] couldn't fetch markets for {series}: {e}")
                 continue
@@ -177,7 +189,7 @@ def run():
         # --- Leg 2: tennis mean reversion, Leg 3: tennis value entry ---
         for series in config.TENNIS_SERIES:
             try:
-                markets = kmd.get_markets(series, status="open", limit=10)
+                markets = _apply_title_filter(kmd.get_markets(series, status="open", limit=10))
             except Exception as e:
                 print(f"[warn] couldn't fetch markets for {series}: {e}")
                 continue
