@@ -22,17 +22,29 @@ class Signal:
     strength: float = 1.0  # 0-1, how strong the signal is (used for Kelly edge estimate)
 
 
-def detect_momentum_signal(candles: List[dict]) -> Optional[Signal]:
+def detect_momentum_signal(candles: List[dict], btc_direction: Optional[str] = None) -> Optional[Signal]:
     """
     Leg 1: volume spike + price move together, in the same direction.
     `candles` should be sorted oldest -> newest, at 1-min resolution, covering
-    at least the last 35 minutes (30 min trailing average + 5 min current window).
+    at least MOMENTUM_TRAILING_WINDOW_MINUTES + MOMENTUM_CURRENT_WINDOW_MINUTES.
+
+    `btc_direction`: an independent read on real BTC price direction (from
+    Coinbase, not Kalshi's own order book -- see coinbase_data.py). Kalshi's
+    volume-spike + price-move condition still decides WHETHER to trade
+    (it's a legitimate "something's happening" trigger); when btc_direction
+    is available, it decides WHICH WAY, since Kalshi's own price move on a
+    15-minute market's thin book is a noisier read than the real index this
+    contract actually resolves against. Falls back to Kalshi's own
+    price-move direction if btc_direction is None (Coinbase unavailable) --
+    this upgrades the direction call when possible rather than hard-requiring it.
     """
-    if len(candles) < 35:
+    current_n = config.MOMENTUM_CURRENT_WINDOW_MINUTES
+    trailing_n = config.MOMENTUM_TRAILING_WINDOW_MINUTES
+    if len(candles) < current_n + trailing_n:
         return None
 
-    current_window = candles[-5:]
-    trailing_window = candles[-35:-5]
+    current_window = candles[-current_n:]
+    trailing_window = candles[-(current_n + trailing_n):-current_n]
 
     current_volume = sum(c["volume"] for c in current_window)
     trailing_avg_volume = sum(c["volume"] for c in trailing_window) / len(trailing_window)
@@ -47,12 +59,15 @@ def detect_momentum_signal(candles: List[dict]) -> Optional[Signal]:
     price_moved_enough = abs(price_move) >= config.MOMENTUM_PRICE_MOVE_CENTS
 
     if volume_spike and price_moved_enough:
-        direction = "yes" if price_move > 0 else "no"
+        kalshi_direction = "yes" if price_move > 0 else "no"
+        direction = btc_direction if btc_direction is not None else kalshi_direction
+        source = "Coinbase BTC trend" if btc_direction is not None else "Kalshi price move"
         strength = min(1.0, (volume_ratio / config.MOMENTUM_VOLUME_SPIKE_MULTIPLE) *
                        (abs(price_move) / config.MOMENTUM_PRICE_MOVE_CENTS) / 2)
         return Signal(
             direction=direction,
-            reason=f"volume {volume_ratio:.1f}x trailing avg, price moved {price_move:+.1f}c in 5min",
+            reason=(f"volume {volume_ratio:.1f}x trailing avg triggered entry, "
+                    f"direction from {source} ({direction})"),
             strength=strength,
         )
     return None
@@ -136,11 +151,14 @@ def _watchlist_player_direction(market_title: str):
     the captured subject clause may include a first name ("Will Hailey
     Baptiste win...", not just "Will Baptiste win..."), so this extracts
     that clause via regex rather than naively checking a literal prefix.
-    If a watchlist name is a substring of the subject clause, she's YES.
-    If a watchlist name appears elsewhere in the title but not in the
-    subject clause, she's the named opponent -- betting NO is the bet on
-    her winning. Returns (player_name, direction) or None if no watchlist
-    player appears in the title at all.
+
+    Two passes, not one: if BOTH players in a match are watchlisted (e.g.
+    Alcaraz vs Zverev), the subject match must always win regardless of
+    which name happens to come first in WATCHLIST_PLAYERS -- a single-pass
+    loop would incorrectly return whichever name it hits first, even if
+    that name is the non-subject opponent.
+
+    Returns (player_name, direction) or None if no watchlist player appears.
     """
     if not market_title or not config.WATCHLIST_PLAYERS:
         return None
@@ -149,11 +167,11 @@ def _watchlist_player_direction(market_title: str):
     subject_clause = subject_match.group(1) if subject_match else ""
 
     for name in config.WATCHLIST_PLAYERS:
-        name_lower = name.lower()
-        if name_lower in subject_clause:
+        if name.lower() in subject_clause:
             return (name, "yes")
-        if name_lower in title_lower:
-            return (name, "no")  # mentioned, but not in the subject clause -- she's the opponent
+    for name in config.WATCHLIST_PLAYERS:
+        if name.lower() in title_lower:
+            return (name, "no")  # mentioned, but not the subject -- she's the opponent
     return None
 
 

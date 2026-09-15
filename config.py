@@ -28,7 +28,14 @@ KALSHI_API_KEY_ID_ENV = "KALSHI_API_KEY_ID"
 KALSHI_PRIVATE_KEY_PATH_ENV = "KALSHI_PRIVATE_KEY_PATH"
 
 # --- Universe ---
-CRYPTO_SERIES = ["KXBTCD", "KXBTC", "KXETHD", "KXETH"]
+# KXBTC15M: "BTC price up in next 15 mins?" -- verified live against real
+# Kalshi ticker instances (e.g. KXBTC15M-26APR210945-45), resolves on a CF
+# Benchmarks BRTI average comparison. A single market only exists for 15
+# minutes total, which is why MOMENTUM_TRAILING_WINDOW_MINUTES/
+# MOMENTUM_CURRENT_WINDOW_MINUTES below are compressed way down from the
+# original 30/5 -- the old windows needed 35 minutes of history a 15-minute
+# market can never provide.
+CRYPTO_SERIES = ["KXBTC15M"]
 # KXITFWMATCH confirmed live/active against Kalshi's real market data.
 # KXITFMMATCH (men's) follows the same naming convention as the confirmed
 # tickers (KXATPMATCH/KXWTAMATCH -> KXITFWMATCH for women) but is INFERRED,
@@ -38,9 +45,16 @@ CRYPTO_SERIES = ["KXBTCD", "KXBTC", "KXETHD", "KXETH"]
 TENNIS_SERIES = ["KXATPMATCH", "KXWTAMATCH", "KXITFWMATCH", "KXITFMMATCH"]
 
 # --- Leg 1: Crypto momentum ---
-MOMENTUM_VOLUME_SPIKE_MULTIPLE = 3.0     # current 5-min volume vs trailing 30-min avg
-MOMENTUM_PRICE_MOVE_CENTS = 2            # min price move (cents) in the 5-min window
+MOMENTUM_VOLUME_SPIKE_MULTIPLE = 3.0     # current window volume vs trailing window avg
+MOMENTUM_PRICE_MOVE_CENTS = 2            # min price move (cents) in the current window
 MOMENTUM_MAX_SPREAD_CENTS = 4            # don't chase if spread wider than this
+# Compressed to fit a KXBTC15M market's 15-minute total lifespan (was 30/5
+# when scanning longer-lived hourly/daily BTC range markets). 6+2=8 minutes
+# of required history leaves roughly a 7-minute window near the end of each
+# market's life where a signal could actually fire and still have time to
+# reach take-profit before the market forces resolution -- tight, but real.
+MOMENTUM_TRAILING_WINDOW_MINUTES = 6
+MOMENTUM_CURRENT_WINDOW_MINUTES = 2
 # Kalshi's taker fee peaks at ~1.75c/contract at a 50c price and is charged
 # on BOTH open and close -- worst case ~3.5c/contract round trip. Thresholds
 # below were widened from the original 8c/4c so a win still clears the fee
@@ -100,7 +114,11 @@ KALSHI_BACKOFF_JITTER_SECONDS = 0.5           # randomized, avoids thundering-he
 # names (case-insensitive substring), its position size gets boosted by
 # WATCHLIST_SIZE_MULTIPLIER, same "boost not gate" pattern as the 35-50c
 # favorability band. Still subordinate to the hard 3% risk cap either way.
-WATCHLIST_PLAYERS = ["Baptiste", "Townsend", "Gauff"]
+WATCHLIST_PLAYERS = [
+    "Baptiste", "Townsend", "Gauff",           # WTA
+    "Rybakina", "Sabalenka",                   # WTA
+    "Zverev", "Shelton", "Khachanov", "Alcaraz",  # ATP
+]
 WATCHLIST_SIZE_MULTIPLIER = 1.5
 # For a watchlisted player specifically (not just whichever side is
 # cheapest generically): take her side once her own win probability rises

@@ -19,9 +19,10 @@ import signals
 import risk
 import execution
 import kalshi_market_data as kmd
+import coinbase_data
 
 POLL_INTERVAL_SECONDS = 60
-CANDLE_LOOKBACK_MINUTES = 40  # need 35 for momentum detector, pad a bit
+CANDLE_LOOKBACK_MINUTES = 14  # KXBTC15M markets only live 15 min total; need 8 (6+2) for the detector, pad a bit
 
 _running = True
 
@@ -148,6 +149,15 @@ def run():
         open_event_tickers = broker.get_open_event_tickers()
 
         # --- Leg 1: crypto momentum ---
+        # Fetched once per cycle, not per-market -- it's the same underlying
+        # BTC price regardless of which KXBTC15M ticker is currently live.
+        try:
+            btc_trend = coinbase_data.get_btc_trend(lookback_minutes=config.MOMENTUM_CURRENT_WINDOW_MINUTES)
+        except Exception as e:
+            print(f"[warn] Coinbase BTC trend fetch failed, falling back to Kalshi-only direction: {e}")
+            btc_trend = None
+        btc_direction = btc_trend["direction"] if btc_trend else None
+
         for series in config.CRYPTO_SERIES:
             try:
                 markets = kmd.get_markets(series, status="open", limit=10)
@@ -172,7 +182,7 @@ def run():
                     print(f"[warn] candlesticks failed for {ticker}: {e}")
                     continue
 
-                sig = signals.detect_momentum_signal(candles)
+                sig = signals.detect_momentum_signal(candles, btc_direction=btc_direction)
                 if sig:
                     already_signaled_events.add(ticker)
                     current_price = candles[-1]["price_cents"] if candles else 50.0
