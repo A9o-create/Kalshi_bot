@@ -10,6 +10,7 @@ Trade format expected (matches Kalshi's trade shape, simplified):
 """
 
 from dataclasses import dataclass
+import re
 from typing import Optional, List
 import config
 
@@ -127,13 +128,49 @@ def detect_reversion_signal(trades: List[dict], current_ts: int) -> Optional[Sig
     return None
 
 
-def detect_value_entry_signal(trades: List[dict], market_age_seconds: float) -> Optional[Signal]:
+def _watchlist_player_direction(market_title: str):
+    """
+    Checks whether a watchlisted player appears in the market title, and
+    which side of the contract actually represents her winning. Kalshi
+    titles this market as "Will {Full Name} win the {A} vs {B} match?" --
+    the captured subject clause may include a first name ("Will Hailey
+    Baptiste win...", not just "Will Baptiste win..."), so this extracts
+    that clause via regex rather than naively checking a literal prefix.
+    If a watchlist name is a substring of the subject clause, she's YES.
+    If a watchlist name appears elsewhere in the title but not in the
+    subject clause, she's the named opponent -- betting NO is the bet on
+    her winning. Returns (player_name, direction) or None if no watchlist
+    player appears in the title at all.
+    """
+    if not market_title or not config.WATCHLIST_PLAYERS:
+        return None
+    title_lower = market_title.lower().strip()
+    subject_match = re.match(r"^will\s+(.+?)\s+win\b", title_lower)
+    subject_clause = subject_match.group(1) if subject_match else ""
+
+    for name in config.WATCHLIST_PLAYERS:
+        name_lower = name.lower()
+        if name_lower in subject_clause:
+            return (name, "yes")
+        if name_lower in title_lower:
+            return (name, "no")  # mentioned, but not in the subject clause -- she's the opponent
+    return None
+
+
+def detect_value_entry_signal(trades: List[dict], market_age_seconds: float, market_title: Optional[str] = None) -> Optional[Signal]:
     """
     Leg 3: buy whichever side (yes/no) is cheaper, but only near the start of
     the market's life (proxy for "beginning of the match" -- Kalshi doesn't
     expose match clock/score). Exit is percentage-based, handled separately
     by risk.check_value_entry_exit since it depends on the open position,
     not just the trade tape.
+
+    For a watchlisted player specifically, this overrides the generic
+    "whichever side is cheaper" logic: take HER side once her own win
+    probability clears WATCHLIST_MIN_ENTRY_PCT, buying as low as possible
+    above that floor. Below the floor she's too much of a longshot -- skip
+    this market entirely rather than falling back to the generic rule,
+    since the whole point is a deliberate, bounded entry on her specifically.
     """
     if not trades:
         return None
@@ -143,6 +180,17 @@ def detect_value_entry_signal(trades: List[dict], market_age_seconds: float) -> 
     yes_price = trades[-1]["yes_price_cents"]
     if yes_price <= 0 or yes_price >= 100:
         return None  # degenerate price, nothing to trade
+
+    watchlist_match = _watchlist_player_direction(market_title) if market_title else None
+    if watchlist_match:
+        name, direction = watchlist_match
+        her_price = yes_price if direction == "yes" else (100 - yes_price)
+        if config.WATCHLIST_MIN_ENTRY_PCT < her_price <= 50:
+            return Signal(
+                direction=direction,
+                reason=f"watchlist entry: {name} at {her_price:.0f}c (above {config.WATCHLIST_MIN_ENTRY_PCT}c floor)",
+            )
+        return None  # identified watchlist player, but outside the target range -- skip, don't fall back
 
     if yes_price <= 50:
         return Signal(direction="yes", reason=f"early value entry: yes cheap at {yes_price:.0f}c")

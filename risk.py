@@ -49,30 +49,36 @@ def entry_favorability_multiplier(side_price_cents: float) -> float:
     if config.FAVORABLE_ENTRY_PRICE_MIN_CENTS <= side_price_cents <= config.FAVORABLE_ENTRY_PRICE_MAX_CENTS:
         return config.FAVORABLE_ENTRY_SIZE_MULTIPLIER
     return 1.0
+
+
+def watchlist_multiplier(market_title: str) -> float:
     """
-    side_price_cents = the price actually paid for the side being bought
-    (not necessarily the raw YES price -- for a NO position it's 100 minus
-    that). Boosts sizing when the entry falls in the 35-50c "sweet spot":
-    meaningfully cheaper fees than a 50c coin flip, while avoiding the
-    illiquidity of deep longshots below 35c. Multiplier only, never a hard
-    gate -- entries outside the band still size normally, just smaller.
+    Boosts sizing when the market's title matches one of WATCHLIST_PLAYERS
+    (case-insensitive substring). Does NOT restrict which markets get
+    scanned or traded -- every market is still evaluated normally, this
+    only makes watchlist matches size larger, same "boost not gate" pattern
+    as entry_favorability_multiplier above.
     """
-    if config.FAVORABLE_ENTRY_PRICE_MIN_CENTS <= side_price_cents <= config.FAVORABLE_ENTRY_PRICE_MAX_CENTS:
-        return config.FAVORABLE_ENTRY_SIZE_MULTIPLIER
+    if not config.WATCHLIST_PLAYERS or not market_title:
+        return 1.0
+    title_lower = market_title.lower()
+    if any(name.lower() in title_lower for name in config.WATCHLIST_PLAYERS):
+        return config.WATCHLIST_SIZE_MULTIPLIER
     return 1.0
 
 
 def position_size_dollars(balance: float, win_prob: float, win_cents: float, loss_cents: float,
-                           side_price_cents: Optional[float] = None) -> float:
+                           side_price_cents: Optional[float] = None, market_title: Optional[str] = None) -> float:
     """
-    Capped fractional Kelly: min(0.25 * Kelly, 3% of balance), with an
-    optional favorability boost applied before the hard cap -- so a
-    favorable entry can size up to the cap sooner, but the cap itself
-    (the true risk ceiling) never moves.
+    Capped fractional Kelly: min(0.25 * Kelly, 3% of balance), with optional
+    favorability boosts (price band + watchlist, stacked multiplicatively)
+    applied before the hard cap -- so a favorable/watchlisted entry can size
+    up to the cap sooner, but the cap itself (the true risk ceiling) never moves.
     """
     full_kelly = kelly_fraction(win_prob, win_cents, loss_cents)
-    multiplier = entry_favorability_multiplier(side_price_cents) if side_price_cents is not None else 1.0
-    fractional_kelly_dollars = balance * full_kelly * config.MAX_KELLY_FRACTION * multiplier
+    price_multiplier = entry_favorability_multiplier(side_price_cents) if side_price_cents is not None else 1.0
+    watch_multiplier = watchlist_multiplier(market_title) if market_title is not None else 1.0
+    fractional_kelly_dollars = balance * full_kelly * config.MAX_KELLY_FRACTION * price_multiplier * watch_multiplier
     hard_cap_dollars = balance * config.MAX_POSITION_PCT_OF_BALANCE
     return max(0.0, min(fractional_kelly_dollars, hard_cap_dollars))
 

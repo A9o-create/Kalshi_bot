@@ -94,13 +94,21 @@ KALSHI_MAX_429_RETRIES = 2                    # up to 3 total attempts per call
 KALSHI_BACKOFF_BASE_SECONDS = 1.0             # doubles each retry (1s, 2s, ...)
 KALSHI_BACKOFF_JITTER_SECONDS = 0.5           # randomized, avoids thundering-herd retries
 
-# --- Optional: restrict trading to markets matching specific player(s) ---
-# When set, every leg only considers markets whose "title" field contains
-# ANY of these strings (case-insensitive) -- e.g. specific players' surnames.
-# Also meaningfully reduces API call volume per cycle (fewer per-market
-# candlestick/trade-history lookups), which helps with Kalshi's rate limits.
-# Leave empty list/None to scan everything, as before.
-TARGET_MARKET_TITLE_FILTER = ["Baptiste", "Townsend", "Gauff"]
+# --- Watchlist: prioritize specific players via sizing, not exclusion ---
+# Every market is still scanned and tradeable as normal -- this does NOT
+# restrict the universe. When a signal's market title matches one of these
+# names (case-insensitive substring), its position size gets boosted by
+# WATCHLIST_SIZE_MULTIPLIER, same "boost not gate" pattern as the 35-50c
+# favorability band. Still subordinate to the hard 3% risk cap either way.
+WATCHLIST_PLAYERS = ["Baptiste", "Townsend", "Gauff"]
+WATCHLIST_SIZE_MULTIPLIER = 1.5
+# For a watchlisted player specifically (not just whichever side is
+# cheapest generically): take her side once her own win probability rises
+# above this floor, buying as low as possible above it. Below this floor
+# she's too much of a longshot -- thin, illiquid, not a genuine value bet,
+# just noise. E.g. Baptiste at 31c YES clears the floor and gets taken;
+# Baptiste at 12c YES does not.
+WATCHLIST_MIN_ENTRY_PCT = 29
 
 # --- Paper trading starting balance (backtest & paper_prod only) ---
 PAPER_STARTING_BALANCE_DOLLARS = 1000.0

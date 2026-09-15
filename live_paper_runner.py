@@ -45,19 +45,20 @@ def _market_age_seconds(trades: list) -> float:
     return time.time() - trades[0]["ts"]
 
 
-def _apply_title_filter(markets: list) -> list:
+def _apply_depth_cap(ticker: str, direction: str, side_price: float, size: float) -> float:
     """
-    If config.TARGET_MARKET_TITLE_FILTER is set (a list of strings), keeps
-    only markets whose title contains ANY of them (case-insensitive) --
-    e.g. a list of specific players' surnames. Applied right after
-    get_markets(), before any per-market candlestick/trade-history calls --
-    so this also directly cuts API call volume, not just which markets get
-    traded.
+    Fetches the orderbook and caps `size` to MAX_BOOK_DEPTH_FRACTION of the
+    liquidity actually resting at the entry price level, so a capped-Kelly
+    size doesn't walk a thin book. Fails open (returns size unchanged) if the
+    orderbook fetch errors -- missing depth data shouldn't block a trade.
     """
-    if not config.TARGET_MARKET_TITLE_FILTER:
-        return markets
-    needles = [n.lower() for n in config.TARGET_MARKET_TITLE_FILTER]
-    return [m for m in markets if any(n in (m.get("title") or "").lower() for n in needles)]
+    try:
+        ob = kmd.get_orderbook(ticker)
+        available = ob["best_yes_ask_size"] if direction == "yes" else ob["best_no_ask_size"]
+        return risk.cap_size_by_depth(size, side_price, available)
+    except Exception as e:
+        print(f"[warn] orderbook depth check failed for {ticker}, sizing without a depth cap: {e}")
+        return size
     """
     Fetches the orderbook and caps `size` to MAX_BOOK_DEPTH_FRACTION of the
     liquidity actually resting at the entry price level, so a capped-Kelly
@@ -149,7 +150,7 @@ def run():
         # --- Leg 1: crypto momentum ---
         for series in config.CRYPTO_SERIES:
             try:
-                markets = _apply_title_filter(kmd.get_markets(series, status="open", limit=10))
+                markets = kmd.get_markets(series, status="open", limit=10)
             except Exception as e:
                 print(f"[warn] couldn't fetch markets for {series}: {e}")
                 continue
@@ -180,7 +181,7 @@ def run():
                     size = risk.position_size_dollars(
                         broker.balance, win_prob,
                         config.MOMENTUM_TAKE_PROFIT_CENTS, config.MOMENTUM_STOP_LOSS_CENTS,
-                        side_price_cents=side_price,
+                        side_price_cents=side_price, market_title=m.get("title", ticker),
                     )
                     size = _apply_depth_cap(ticker, sig.direction, side_price, size)
                     if size > 0:
@@ -189,7 +190,7 @@ def run():
         # --- Leg 2: tennis mean reversion, Leg 3: tennis value entry ---
         for series in config.TENNIS_SERIES:
             try:
-                markets = _apply_title_filter(kmd.get_markets(series, status="open", limit=10))
+                markets = kmd.get_markets(series, status="open", limit=10)
             except Exception as e:
                 print(f"[warn] couldn't fetch markets for {series}: {e}")
                 continue
@@ -221,7 +222,7 @@ def run():
                     size = risk.position_size_dollars(
                         broker.balance, win_prob,
                         config.REVERSION_TAKE_PROFIT_CENTS, config.REVERSION_STOP_LOSS_CENTS,
-                        side_price_cents=side_price,
+                        side_price_cents=side_price, market_title=m.get("title", ticker),
                     )
                     size = _apply_depth_cap(ticker, sig.direction, side_price, size)
                     if size > 0:
@@ -230,7 +231,7 @@ def run():
 
                 # Leg 3: value entry (early match, buy the cheap side)
                 age = _market_age_seconds(trades)
-                sig = signals.detect_value_entry_signal(trades, age)
+                sig = signals.detect_value_entry_signal(trades, age, market_title=m.get("title"))
                 if sig:
                     already_signaled_events.add(ticker)
                     current_price = trades[-1]["yes_price_cents"]
@@ -239,7 +240,7 @@ def run():
                     win_prob = 0.55
                     win_cents = side_price * config.VALUE_ENTRY_TAKE_PROFIT_MIN_PCT
                     loss_cents = side_price * config.VALUE_ENTRY_STOP_LOSS_PCT
-                    size = risk.position_size_dollars(broker.balance, win_prob, win_cents, loss_cents, side_price_cents=side_price)
+                    size = risk.position_size_dollars(broker.balance, win_prob, win_cents, loss_cents, side_price_cents=side_price, market_title=m.get("title", ticker))
                     size = _apply_depth_cap(ticker, sig.direction, side_price, size)
                     if size > 0:
                         broker.open_position(ticker, event_ticker, sig.direction, current_price, size, sig.reason, strategy="value_entry", market_title=m.get("title", ticker))
