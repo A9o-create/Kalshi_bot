@@ -46,20 +46,26 @@ def _market_age_seconds(trades: list) -> float:
     return time.time() - trades[0]["ts"]
 
 
+def _derive_match_key(ticker: str) -> str:
+    """
+    Derives a shared key for "the same underlying match/window" directly
+    from the ticker string, rather than trusting Kalshi's own event_ticker
+    field (which we found doesn't reliably group paired per-player markets
+    for the same match -- e.g. KXWTAMATCH-26SEP15SEMKIN-SEM and
+    KXWTAMATCH-26SEP15SEMKIN-KIN are TWO SEPARATE Kalshi markets for the
+    same match, one per player, and their event_ticker values didn't
+    correctly group them, letting the bot hold correlated positions on
+    both "sides" simultaneously -- economically close to the same bet,
+    paying fees twice for overlapping exposure).
+
+    Strips the final "-XXX" segment (the per-player/per-strike suffix),
+    keeping everything before it as the shared match/window identifier.
+    """
+    parts = ticker.rsplit("-", 1)
+    return parts[0] if len(parts) > 1 else ticker
+
+
 def _apply_depth_cap(ticker: str, direction: str, side_price: float, size: float) -> float:
-    """
-    Fetches the orderbook and caps `size` to MAX_BOOK_DEPTH_FRACTION of the
-    liquidity actually resting at the entry price level, so a capped-Kelly
-    size doesn't walk a thin book. Fails open (returns size unchanged) if the
-    orderbook fetch errors -- missing depth data shouldn't block a trade.
-    """
-    try:
-        ob = kmd.get_orderbook(ticker)
-        available = ob["best_yes_ask_size"] if direction == "yes" else ob["best_no_ask_size"]
-        return risk.cap_size_by_depth(size, side_price, available)
-    except Exception as e:
-        print(f"[warn] orderbook depth check failed for {ticker}, sizing without a depth cap: {e}")
-        return size
     """
     Fetches the orderbook and caps `size` to MAX_BOOK_DEPTH_FRACTION of the
     liquidity actually resting at the entry price level, so a capped-Kelly
@@ -160,14 +166,14 @@ def run():
 
         for series in config.CRYPTO_SERIES:
             try:
-                markets = kmd.get_markets(series, status="open", limit=10)
+                markets = kmd.get_markets(series, status="open", limit=config.MAX_MARKETS_PER_SERIES)
             except Exception as e:
                 print(f"[warn] couldn't fetch markets for {series}: {e}")
                 continue
 
             for m in markets:
                 ticker = m["ticker"]
-                event_ticker = m.get("event_ticker", ticker)
+                event_ticker = _derive_match_key(ticker)
                 if ticker in already_signaled_events:
                     continue
                 allowed, reason = risk.can_open_new_position(broker.get_open_position_count(), open_event_tickers, event_ticker)
@@ -200,14 +206,14 @@ def run():
         # --- Leg 2: tennis mean reversion, Leg 3: tennis value entry ---
         for series in config.TENNIS_SERIES:
             try:
-                markets = kmd.get_markets(series, status="open", limit=10)
+                markets = kmd.get_markets(series, status="open", limit=config.MAX_MARKETS_PER_SERIES)
             except Exception as e:
                 print(f"[warn] couldn't fetch markets for {series}: {e}")
                 continue
 
             for m in markets:
                 ticker = m["ticker"]
-                event_ticker = m.get("event_ticker", ticker)
+                event_ticker = _derive_match_key(ticker)
                 if ticker in already_signaled_events:
                     continue
                 allowed, reason = risk.can_open_new_position(broker.get_open_position_count(), open_event_tickers, event_ticker)

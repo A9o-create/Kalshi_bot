@@ -94,19 +94,35 @@ FAVORABLE_ENTRY_SIZE_MULTIPLIER = 1.25
 MAX_KELLY_FRACTION = 0.25                # fraction of full Kelly to actually use
 MAX_POSITION_PCT_OF_BALANCE = 0.03       # hard cap per trade regardless of Kelly
 DAILY_LOSS_CAP_PCT = 0.10                # halt bot for the day if breached
-MAX_CONCURRENT_POSITIONS = 5
+MAX_CONCURRENT_POSITIONS = 10  # was 5 -- up to 30% of balance deployed at once now, vs 15% before
 MAX_POSITIONS_PER_EVENT = 1
 
 # --- Kalshi request pacing / 429 handling ---
-# Kalshi's public endpoints have been getting rate-limited heavily during
-# heavy-scan cycles (multiple series x multiple markets x candlesticks/trades
-# each, with no spacing between requests). This enforces a minimum interval
-# between consecutive requests, and retries 429s with backoff instead of
-# giving up on the first one.
-KALSHI_MIN_REQUEST_INTERVAL_SECONDS = 0.15   # caps request rate to ~6-7/sec
-KALSHI_MAX_429_RETRIES = 2                    # up to 3 total attempts per call
-KALSHI_BACKOFF_BASE_SECONDS = 1.0             # doubles each retry (1s, 2s, ...)
-KALSHI_BACKOFF_JITTER_SECONDS = 0.5           # randomized, avoids thundering-herd retries
+# Kalshi's own docs put the lowest AUTHENTICATED tier (Basic, granted just
+# for signing up) at 20 reads/sec -- our requests are unauthenticated, so
+# the real limit we're subject to is likely lower and undocumented. Real
+# session data (Sep 15) showed near-constant 429s even with 0.15s spacing +
+# retries, across ~5 series x up to 10 markets each every 60s -- clearly
+# too fast and too broad for whatever the actual anonymous limit is.
+# Slowed down substantially rather than guessing again.
+KALSHI_MIN_REQUEST_INTERVAL_SECONDS = 1.0    # was 0.15 -- ~10x more conservative
+KALSHI_MAX_429_RETRIES = 3                    # was 2 -- one more attempt before giving up
+KALSHI_BACKOFF_BASE_SECONDS = 2.0             # was 1.0 -- more patient between retries
+KALSHI_BACKOFF_JITTER_SECONDS = 1.0           # was 0.5
+
+# How long a get_markets() result is reused before re-fetching. Market
+# listings for a tennis series don't meaningfully change minute to minute --
+# re-listing every single 60s cycle across 5 series was pure waste driving
+# up request volume for no signal benefit. Candlesticks/trades (the actual
+# price data) are NOT cached -- those genuinely need to be fresh.
+MARKETS_CACHE_TTL_SECONDS = 240
+# Caps how many markets per series get scanned for candlesticks/trades each
+# cycle (those calls, unlike the listing itself, can't be cached -- they
+# need fresh data). At KALSHI_MIN_REQUEST_INTERVAL_SECONDS=1.0s, 10 markets
+# x ~5 series was up to ~50s of pure request spacing per cycle, dangerously
+# close to the 60s poll interval. Reduced so the slower pacing still fits
+# comfortably within a cycle.
+MAX_MARKETS_PER_SERIES = 4
 
 # --- Watchlist: prioritize specific players via sizing, not exclusion ---
 # Every market is still scanned and tradeable as normal -- this does NOT

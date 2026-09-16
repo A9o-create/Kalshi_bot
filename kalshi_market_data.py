@@ -60,12 +60,36 @@ def _base_url() -> str:
     return config.KALSHI_API_BASE_URL
 
 
+_markets_cache = {}  # {(series_ticker, status, limit): (fetched_at, markets)}
+
+
 def get_markets(series_ticker: str, status: str = "open", limit: int = 50) -> list[dict]:
-    resp = _get(
-        f"{_base_url()}/markets",
-        params={"series_ticker": series_ticker, "status": status, "limit": limit},
-    )
-    return resp.json().get("markets", [])
+    """
+    Cached for MARKETS_CACHE_TTL_SECONDS -- a series' market listing doesn't
+    meaningfully change minute to minute, and re-fetching it every single
+    60s cycle across every series was pure wasted request volume. If the
+    cache is stale but the fresh fetch fails (e.g. rate limited), falls
+    back to the stale cached value rather than returning nothing -- a few
+    minutes of staleness is far better than an empty scan.
+    """
+    key = (series_ticker, status, limit)
+    now = time.time()
+    cached = _markets_cache.get(key)
+    if cached and (now - cached[0]) < config.MARKETS_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    try:
+        resp = _get(
+            f"{_base_url()}/markets",
+            params={"series_ticker": series_ticker, "status": status, "limit": limit},
+        )
+        markets = resp.json().get("markets", [])
+        _markets_cache[key] = (now, markets)
+        return markets
+    except Exception:
+        if cached:
+            return cached[1]  # stale is better than nothing
+        raise
 
 
 def get_recent_trades(ticker: str, limit: int = 100, min_ts: int = None) -> list[dict]:
