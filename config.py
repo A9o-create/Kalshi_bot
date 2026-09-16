@@ -124,6 +124,16 @@ MARKETS_CACHE_TTL_SECONDS = 240
 # comfortably within a cycle.
 MAX_MARKETS_PER_SERIES = 4
 
+# --- Re-entry cooldown ---
+# Real session data (Sep 16) showed the bot getting whipsawed by a single
+# volatile match: no cooldown meant it re-entered the same ticker the very
+# next cycle after closing, over and over, as price swung wildly -- ~15
+# round trips in 35 minutes, paying fees on every single one, net losing
+# money even though some individual trades were profitable. This blocks
+# re-entry on the same match (not just the same ticker -- also covers the
+# paired-market case) for a cooldown window after any close.
+REENTRY_COOLDOWN_SECONDS = 300  # 5 minutes
+
 # --- Watchlist: prioritize specific players via sizing, not exclusion ---
 # Every market is still scanned and tradeable as normal -- this does NOT
 # restrict the universe. When a signal's market title matches one of these

@@ -22,7 +22,7 @@ class Signal:
     strength: float = 1.0  # 0-1, how strong the signal is (used for Kelly edge estimate)
 
 
-def detect_momentum_signal(candles: List[dict], btc_direction: Optional[str] = None) -> Optional[Signal]:
+def detect_momentum_signal(candles: List[dict], btc_direction: Optional[str] = None):
     """
     Leg 1: volume spike + price move together, in the same direction.
     `candles` should be sorted oldest -> newest, at 1-min resolution, covering
@@ -37,26 +37,44 @@ def detect_momentum_signal(candles: List[dict], btc_direction: Optional[str] = N
     contract actually resolves against. Falls back to Kalshi's own
     price-move direction if btc_direction is None (Coinbase unavailable) --
     this upgrades the direction call when possible rather than hard-requiring it.
+
+    Returns (Signal | None, diagnostics: dict). Diagnostics are populated at
+    EVERY return point, not just when a signal fires -- this module is
+    deliberately pure (no I/O, no printing), so a caller that wants
+    visibility into near-misses (real gap found Sep 16: KXBTC15M went ~10
+    hours with zero fires and zero visibility into why) logs `diagnostics`
+    itself rather than this function doing it.
     """
     current_n = config.MOMENTUM_CURRENT_WINDOW_MINUTES
     trailing_n = config.MOMENTUM_TRAILING_WINDOW_MINUTES
+    diagnostics = {"candle_count": len(candles), "required_candles": current_n + trailing_n}
+
     if len(candles) < current_n + trailing_n:
-        return None
+        diagnostics["reason"] = "insufficient_history"
+        return None, diagnostics
 
     current_window = candles[-current_n:]
     trailing_window = candles[-(current_n + trailing_n):-current_n]
 
     current_volume = sum(c["volume"] for c in current_window)
     trailing_avg_volume = sum(c["volume"] for c in trailing_window) / len(trailing_window)
+    diagnostics["current_volume"] = current_volume
+    diagnostics["trailing_avg_volume"] = trailing_avg_volume
 
     if trailing_avg_volume <= 0:
-        return None
+        diagnostics["reason"] = "zero_trailing_volume"
+        diagnostics["volume_ratio"] = None
+        return None, diagnostics
 
     volume_ratio = current_volume / trailing_avg_volume
     price_move = current_window[-1]["price_cents"] - current_window[0]["price_cents"]
+    diagnostics["volume_ratio"] = volume_ratio
+    diagnostics["price_move_cents"] = price_move
 
     volume_spike = volume_ratio >= config.MOMENTUM_VOLUME_SPIKE_MULTIPLE
     price_moved_enough = abs(price_move) >= config.MOMENTUM_PRICE_MOVE_CENTS
+    diagnostics["volume_spike"] = volume_spike
+    diagnostics["price_moved_enough"] = price_moved_enough
 
     if volume_spike and price_moved_enough:
         kalshi_direction = "yes" if price_move > 0 else "no"
@@ -64,13 +82,22 @@ def detect_momentum_signal(candles: List[dict], btc_direction: Optional[str] = N
         source = "Coinbase BTC trend" if btc_direction is not None else "Kalshi price move"
         strength = min(1.0, (volume_ratio / config.MOMENTUM_VOLUME_SPIKE_MULTIPLE) *
                        (abs(price_move) / config.MOMENTUM_PRICE_MOVE_CENTS) / 2)
-        return Signal(
+        diagnostics["reason"] = "signal_fired"
+        sig = Signal(
             direction=direction,
             reason=(f"volume {volume_ratio:.1f}x trailing avg triggered entry, "
                     f"direction from {source} ({direction})"),
             strength=strength,
         )
-    return None
+        return sig, diagnostics
+
+    if not volume_spike and not price_moved_enough:
+        diagnostics["reason"] = "no_volume_spike_and_no_price_move"
+    elif not volume_spike:
+        diagnostics["reason"] = "no_volume_spike"
+    else:
+        diagnostics["reason"] = "no_price_move"
+    return None, diagnostics
 
 
 def detect_reversion_signal(trades: List[dict], current_ts: int) -> Optional[Signal]:

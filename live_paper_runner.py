@@ -94,6 +94,13 @@ def run():
     # once its position closes, so the same market can be re-entered later.
     already_signaled_events: set[str] = set()
 
+    # match-level cooldown after a close (see REENTRY_COOLDOWN_SECONDS) --
+    # separate from already_signaled_events, which only debounces within a
+    # single cycle. This blocks re-entry across MANY cycles after a close,
+    # keyed by the match key (pos.event_ticker), not the raw ticker, so it
+    # also covers the paired-market case.
+    cooldown_until: dict[str, float] = {}
+
     # signal.signal() only works in the main thread -- when server.py runs
     # this inside a background thread (the Render deployment path), skip it
     # entirely. Ctrl+C handling only matters for direct/tmux use anyway.
@@ -149,6 +156,7 @@ def run():
                     print(f"[exit] {pos.ticker} ({pos.strategy}): {exit_reason}")
                     broker.close_position(pos.ticker, current_price)
                     already_signaled_events.discard(pos.ticker)
+                    cooldown_until[pos.event_ticker] = time.time() + config.REENTRY_COOLDOWN_SECONDS
             except Exception as e:
                 print(f"[warn] exit check failed for {pos.ticker}: {e}")
 
@@ -176,6 +184,8 @@ def run():
                 event_ticker = _derive_match_key(ticker)
                 if ticker in already_signaled_events:
                     continue
+                if event_ticker in cooldown_until and time.time() < cooldown_until[event_ticker]:
+                    continue  # recently closed on this match -- cooling down before re-entry
                 allowed, reason = risk.can_open_new_position(broker.get_open_position_count(), open_event_tickers, event_ticker)
                 if not allowed:
                     continue
@@ -188,7 +198,18 @@ def run():
                     print(f"[warn] candlesticks failed for {ticker}: {e}")
                     continue
 
-                sig = signals.detect_momentum_signal(candles, btc_direction=btc_direction)
+                sig, diag = signals.detect_momentum_signal(candles, btc_direction=btc_direction)
+                if diag.get("reason") != "signal_fired":
+                    # visibility into near-misses -- this is the gap that let KXBTC15M
+                    # run silently for ~10 hours with zero evidence of why
+                    if diag.get("volume_ratio") is not None:
+                        print(f"[momentum diag] {ticker}: candles={diag['candle_count']} "
+                              f"vol_ratio={diag['volume_ratio']:.2f}x (need {config.MOMENTUM_VOLUME_SPIKE_MULTIPLE}x) "
+                              f"price_move={diag['price_move_cents']:+.2f}c (need {config.MOMENTUM_PRICE_MOVE_CENTS}c) "
+                              f"reason={diag['reason']}")
+                    else:
+                        print(f"[momentum diag] {ticker}: candles={diag['candle_count']}/{diag['required_candles']} "
+                              f"reason={diag['reason']}")
                 if sig:
                     already_signaled_events.add(ticker)
                     current_price = candles[-1]["price_cents"] if candles else 50.0
@@ -216,6 +237,8 @@ def run():
                 event_ticker = _derive_match_key(ticker)
                 if ticker in already_signaled_events:
                     continue
+                if event_ticker in cooldown_until and time.time() < cooldown_until[event_ticker]:
+                    continue  # recently closed on this match -- cooling down before re-entry
                 allowed, reason = risk.can_open_new_position(broker.get_open_position_count(), open_event_tickers, event_ticker)
                 if not allowed:
                     continue

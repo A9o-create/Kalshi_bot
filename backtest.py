@@ -21,7 +21,7 @@ def backtest_momentum():
     # Slide a 35-minute window across the data, same as live would see it minute-by-minute
     for end in range(35, len(candles) + 1):
         window = candles[:end]
-        sig = signals.detect_momentum_signal(window)
+        sig, diag = signals.detect_momentum_signal(window)
         if sig:
             fired_minutes.append((end - 1, sig))  # minute index the signal fired on
 
