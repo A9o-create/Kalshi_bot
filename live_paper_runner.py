@@ -264,7 +264,18 @@ def run():
                     continue
 
                 # Leg 2: reversion
-                sig = signals.detect_reversion_signal(trades, trades[-1]["ts"])
+                sig, diag = signals.detect_reversion_signal(trades, trades[-1]["ts"])
+                if diag.get("reason") != "signal_fired":
+                    # visibility into near-misses -- same principle as the momentum leg's
+                    # diagnostics, aimed at distinguishing "threshold too strict"
+                    # (no_spike_found) from "premise may not hold for tennis"
+                    # (spike_found_no_pullback)
+                    if diag.get("spike_found"):
+                        pullback_str = f", pullback={diag['pullback_cents']:.1f}c" if "pullback_cents" in diag else ""
+                        print(f"[reversion diag] {ticker}: spike={diag['spike_direction']} "
+                              f"magnitude={diag['spike_magnitude_cents']:.1f}c{pullback_str} reason={diag['reason']}")
+                    else:
+                        print(f"[reversion diag] {ticker}: trades={diag.get('trade_count', 0)} reason={diag['reason']}")
                 if sig:
                     already_signaled_events.add(ticker)
                     current_price = trades[-1]["yes_price_cents"]

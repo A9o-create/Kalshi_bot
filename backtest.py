@@ -51,7 +51,7 @@ def backtest_reversion():
     # Check the detector at each trade timestamp, as if running live tick-by-tick
     for i in range(1, len(trades)):
         current_ts = trades[i]["ts"]
-        sig = signals.detect_reversion_signal(trades[: i + 1], current_ts)
+        sig, diag = signals.detect_reversion_signal(trades[: i + 1], current_ts)
         if sig:
             fired.append((current_ts, sig))
 

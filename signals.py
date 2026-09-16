@@ -146,7 +146,7 @@ def detect_btc_trend_signal(btc_trend: Optional[dict]):
     return sig, diagnostics
 
 
-def detect_reversion_signal(trades: List[dict], current_ts: int) -> Optional[Signal]:
+def detect_reversion_signal(trades: List[dict], current_ts: int):
     """
     Leg 2: fade a sharp price spike once the first sign of pullback appears.
     `trades` sorted oldest -> newest. `current_ts` is "now" for window math.
@@ -155,14 +155,27 @@ def detect_reversion_signal(trades: List[dict], current_ts: int) -> Optional[Sig
       1. Find a spike >= REVERSION_SPIKE_THRESHOLD_CENTS within REVERSION_SPIKE_WINDOW_SECONDS
       2. Confirm a pullback of >= REVERSION_CONFIRM_PULLBACK_CENTS within
          REVERSION_CONFIRM_WINDOW_SECONDS after the spike peak
+
+    Returns (Signal | None, diagnostics: dict), matching detect_momentum_signal's
+    shape. Added Sep 16 after reversion fired zero times all session with no
+    visibility into why -- same gap that hid the real BTC problem. The two
+    failure modes this distinguishes matter differently: no_spike_found means
+    the threshold is probably too strict for how tennis actually moves;
+    spike_found_no_pullback means spikes are happening but not correcting --
+    potential evidence the mean-reversion premise itself doesn't hold for
+    tennis (moves might be continuing as real momentum, not overreacting).
     """
+    diagnostics = {"trade_count": len(trades)}
     if len(trades) < 2:
-        return None
+        diagnostics["reason"] = "insufficient_trades"
+        return None, diagnostics
 
     spike_window_start = current_ts - config.REVERSION_SPIKE_WINDOW_SECONDS - config.REVERSION_CONFIRM_WINDOW_SECONDS
     relevant = [t for t in trades if t["ts"] >= spike_window_start]
+    diagnostics["relevant_trade_count"] = len(relevant)
     if len(relevant) < 2:
-        return None
+        diagnostics["reason"] = "insufficient_trades"
+        return None, diagnostics
 
     # Find the largest spike: scan for (low, high) pairs within the spike window
     best_spike = None  # (start_price, peak_price, peak_ts, direction)
@@ -186,34 +199,47 @@ def detect_reversion_signal(trades: List[dict], current_ts: int) -> Optional[Sig
                 best_spike = candidate
 
     if best_spike is None:
-        return None
+        diagnostics["spike_found"] = False
+        diagnostics["reason"] = "no_spike_found"
+        return None, diagnostics
 
     start_price, peak_price, peak_ts, spike_dir = best_spike
+    diagnostics["spike_found"] = True
+    diagnostics["spike_direction"] = spike_dir
+    diagnostics["spike_magnitude_cents"] = abs(peak_price - start_price)
+
     after_peak = [t for t in relevant if peak_ts < t["ts"] <= peak_ts + config.REVERSION_CONFIRM_WINDOW_SECONDS]
     if not after_peak:
-        return None
+        diagnostics["reason"] = "spike_found_no_data_after"
+        return None, diagnostics
 
     latest_price = after_peak[-1]["yes_price_cents"]
 
     if spike_dir == "up":
         pullback = peak_price - latest_price
+        diagnostics["pullback_cents"] = pullback
         if pullback >= config.REVERSION_CONFIRM_PULLBACK_CENTS:
-            # spike was up, we're fading it -> buy NO
-            return Signal(
+            diagnostics["reason"] = "signal_fired"
+            sig = Signal(
                 direction="no",
                 reason=f"spiked +{peak_price - start_price:.1f}c, pulled back {pullback:.1f}c, fading to NO",
                 strength=min(1.0, pullback / config.REVERSION_CONFIRM_PULLBACK_CENTS / 2),
             )
+            return sig, diagnostics
     else:
         pullback = latest_price - peak_price
+        diagnostics["pullback_cents"] = pullback
         if pullback >= config.REVERSION_CONFIRM_PULLBACK_CENTS:
-            # spike was down, we're fading it -> buy YES
-            return Signal(
+            diagnostics["reason"] = "signal_fired"
+            sig = Signal(
                 direction="yes",
                 reason=f"dropped -{start_price - peak_price:.1f}c, bounced {pullback:.1f}c, fading to YES",
                 strength=min(1.0, pullback / config.REVERSION_CONFIRM_PULLBACK_CENTS / 2),
             )
-    return None
+            return sig, diagnostics
+
+    diagnostics["reason"] = "spike_found_no_pullback"
+    return None, diagnostics
 
 
 def _watchlist_player_direction(market_title: str):
