@@ -55,6 +55,29 @@ MOMENTUM_MAX_SPREAD_CENTS = 4            # don't chase if spread wider than this
 # reach take-profit before the market forces resolution -- tight, but real.
 MOMENTUM_TRAILING_WINDOW_MINUTES = 6
 MOMENTUM_CURRENT_WINDOW_MINUTES = 2
+
+# Real session data (Sep 16, 5 full KXBTC15M windows observed continuously)
+# showed the original Kalshi-volume-spike trigger structurally never fires
+# on this market: trailing volume was zero in EVERY check, every window, no
+# exceptions -- the market just doesn't have baseline liquidity for a spike
+# to stand out from. Since the contract resolves against an external index
+# (CF Benchmarks BRTI) anyway, the trigger now fires directly off Coinbase's
+# real BTC price movement instead of requiring Kalshi-side volume at all.
+# Threshold is a first guess (0.15% over the current-window lookback), not
+# yet calibrated against real fire rate -- watch and adjust.
+MOMENTUM_BTC_TREND_THRESHOLD_PCT = 0.0015
+
+# Decoupled from MOMENTUM_CURRENT_WINDOW_MINUTES (a Kalshi-candle concept
+# that's now largely unused for this leg's trigger) so it can be tuned
+# independently going forward.
+MOMENTUM_BTC_LOOKBACK_MINUTES = 2
+
+# Removing the Kalshi volume requirement also removed our only signal about
+# whether THIS specific 15-min window has anyone actually willing to trade
+# right now. A genuinely empty book would still get a simulated fill in
+# paper mode, which isn't realistic -- this skips the trade instead if
+# fewer than this many contracts are resting at the relevant price level.
+MOMENTUM_MIN_LIQUIDITY_CONTRACTS = 5
 # Kalshi's taker fee peaks at ~1.75c/contract at a 50c price and is charged
 # on BOTH open and close -- worst case ~3.5c/contract round trip. Thresholds
 # below were widened from the original 8c/4c so a win still clears the fee

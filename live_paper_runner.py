@@ -166,11 +166,10 @@ def run():
         # Fetched once per cycle, not per-market -- it's the same underlying
         # BTC price regardless of which KXBTC15M ticker is currently live.
         try:
-            btc_trend = coinbase_data.get_btc_trend(lookback_minutes=config.MOMENTUM_CURRENT_WINDOW_MINUTES)
+            btc_trend = coinbase_data.get_btc_trend(lookback_minutes=config.MOMENTUM_BTC_LOOKBACK_MINUTES)
         except Exception as e:
-            print(f"[warn] Coinbase BTC trend fetch failed, falling back to Kalshi-only direction: {e}")
+            print(f"[warn] Coinbase BTC trend fetch failed, momentum leg will skip this cycle: {e}")
             btc_trend = None
-        btc_direction = btc_trend["direction"] if btc_trend else None
 
         for series in config.CRYPTO_SERIES:
             try:
@@ -198,19 +197,32 @@ def run():
                     print(f"[warn] candlesticks failed for {ticker}: {e}")
                     continue
 
-                sig, diag = signals.detect_momentum_signal(candles, btc_direction=btc_direction)
+                sig, diag = signals.detect_btc_trend_signal(btc_trend)
                 if diag.get("reason") != "signal_fired":
-                    # visibility into near-misses -- this is the gap that let KXBTC15M
-                    # run silently for ~10 hours with zero evidence of why
-                    if diag.get("volume_ratio") is not None:
-                        print(f"[momentum diag] {ticker}: candles={diag['candle_count']} "
-                              f"vol_ratio={diag['volume_ratio']:.2f}x (need {config.MOMENTUM_VOLUME_SPIKE_MULTIPLE}x) "
-                              f"price_move={diag['price_move_cents']:+.2f}c (need {config.MOMENTUM_PRICE_MOVE_CENTS}c) "
-                              f"reason={diag['reason']}")
+                    # visibility into near-misses -- same principle as before,
+                    # now against the new trigger's own diagnostics
+                    if diag.get("pct_change") is not None:
+                        print(f"[momentum diag] {ticker}: coinbase_pct_change={diag['pct_change']*100:+.3f}% "
+                              f"(threshold {config.MOMENTUM_BTC_TREND_THRESHOLD_PCT*100:.2f}%) "
+                              f"direction={diag.get('direction')} reason={diag['reason']}")
                     else:
-                        print(f"[momentum diag] {ticker}: candles={diag['candle_count']}/{diag['required_candles']} "
-                              f"reason={diag['reason']}")
+                        print(f"[momentum diag] {ticker}: reason={diag['reason']}")
                 if sig:
+                    # explicit liquidity check: a signal firing says nothing about
+                    # whether anyone's actually resting an order to trade against
+                    # right now. Only runs on an actual fire (rare), so the extra
+                    # orderbook call doesn't add to the steady-state rate-limit load.
+                    try:
+                        ob = kmd.get_orderbook(ticker)
+                        available = ob["best_yes_ask_size"] if sig.direction == "yes" else ob["best_no_ask_size"]
+                    except Exception as e:
+                        print(f"[warn] orderbook check failed for {ticker}, skipping momentum entry: {e}")
+                        continue
+                    if available < config.MOMENTUM_MIN_LIQUIDITY_CONTRACTS:
+                        print(f"[momentum diag] {ticker}: signal fired but liquidity too thin "
+                              f"({available:.0f} < {config.MOMENTUM_MIN_LIQUIDITY_CONTRACTS} contracts), skipping")
+                        continue
+
                     already_signaled_events.add(ticker)
                     current_price = candles[-1]["price_cents"] if candles else 50.0
                     side_price = current_price if sig.direction == "yes" else (100 - current_price)

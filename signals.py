@@ -100,6 +100,52 @@ def detect_momentum_signal(candles: List[dict], btc_direction: Optional[str] = N
     return None, diagnostics
 
 
+def detect_btc_trend_signal(btc_trend: Optional[dict]):
+    """
+    Leg 1 (BTC), redesigned Sep 16 after real production data: 5 full
+    KXBTC15M market windows observed continuously, and the Kalshi-side
+    volume-spike trigger (detect_momentum_signal above) never once got past
+    "zero_trailing_volume" -- not a bad-luck window, a structural fact about
+    this market's actual liquidity. Since KXBTC15M resolves against an
+    external index (CF Benchmarks BRTI), not Kalshi's own order flow, there
+    was never a strong reason the trigger needed Kalshi's thin book anyway.
+
+    This triggers directly off Coinbase's real BTC price movement
+    (coinbase_data.get_btc_trend) instead -- no Kalshi volume/price
+    condition required at all for this leg.
+
+    `btc_trend`: the dict returned by coinbase_data.get_btc_trend(), or
+    None if that fetch failed. Returns (Signal | None, diagnostics: dict),
+    matching detect_momentum_signal's return shape for consistency.
+    """
+    diagnostics = {"btc_trend_available": btc_trend is not None}
+    if btc_trend is None:
+        diagnostics["reason"] = "coinbase_unavailable"
+        return None, diagnostics
+
+    pct_change = btc_trend.get("pct_change")
+    direction = btc_trend.get("direction")
+    diagnostics["pct_change"] = pct_change
+    diagnostics["direction"] = direction
+
+    if pct_change is None or direction is None:
+        diagnostics["reason"] = "flat_or_malformed_trend"
+        return None, diagnostics
+
+    if abs(pct_change) < config.MOMENTUM_BTC_TREND_THRESHOLD_PCT:
+        diagnostics["reason"] = "below_threshold"
+        return None, diagnostics
+
+    strength = min(1.0, abs(pct_change) / config.MOMENTUM_BTC_TREND_THRESHOLD_PCT / 2)
+    diagnostics["reason"] = "signal_fired"
+    sig = Signal(
+        direction=direction,
+        reason=f"Coinbase BTC moved {pct_change * 100:+.3f}% (threshold {config.MOMENTUM_BTC_TREND_THRESHOLD_PCT * 100:.2f}%), direction={direction}",
+        strength=strength,
+    )
+    return sig, diagnostics
+
+
 def detect_reversion_signal(trades: List[dict], current_ts: int) -> Optional[Signal]:
     """
     Leg 2: fade a sharp price spike once the first sign of pullback appears.
