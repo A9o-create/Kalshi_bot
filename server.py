@@ -1,10 +1,15 @@
 """
-Render deployment entrypoint. A Render web service must bind to a port and
-respond to health checks -- but the actual bot is a long-running loop with
-no HTTP interface of its own. This wraps live_paper_runner.run() (completely
-unchanged -- same continuous while-loop as running it locally in tmux) in a
-background thread, and serves a trivial /health endpoint on the side so
-Render considers the service healthy.
+Render deployment entrypoint for the tennis bot (mean reversion + value
+entry). A Render web service must bind to a port and respond to health
+checks -- but the actual bot is a long-running loop with no HTTP interface
+of its own. This wraps live_paper_runner.run() (completely unchanged --
+same continuous while-loop as running it locally in tmux) in a background
+thread, and serves a trivial /health endpoint on the side so Render
+considers the service healthy.
+
+Deployed as a separate Render service from the momentum (BTC) bot -- see
+momentum_server.py / momentum_runner.py -- so redeploying either one never
+resets the other's accumulated in-memory balance/positions.
 
 This is NOT a cron job on purpose: a cron job would restart as a fresh
 process on every invocation, wiping PaperBroker's in-memory balance and open
@@ -61,17 +66,20 @@ class HealthHandler(BaseHTTPRequestHandler):
 
     def _handle_trades(self):
         """
-        Queries the trades table directly using the app's own psycopg2
-        connection (sslmode=require, the same path that's been used for
-        every successful write) -- bypassing Render's query tool, which has
-        an unrelated SSL negotiation bug on its own connection path.
+        Same shared trades table as the momentum bot (both bots write to the
+        same Postgres, distinguished by the strategy column) -- filtered to
+        the two tennis strategies here so this endpoint shows only THIS
+        bot's trades, not a mixed view of both bots. Queries the app's own
+        psycopg2 connection (sslmode=require, the same path that's been used
+        for every successful write) -- bypassing Render's query tool, which
+        has an unrelated SSL negotiation bug on its own connection path.
         """
         try:
             conn = db_logger._get_connection()
             if conn is None:
                 raise RuntimeError("DATABASE_URL not set")
             with conn, conn.cursor() as cur:
-                cur.execute("SELECT * FROM trades ORDER BY ts DESC LIMIT 50")
+                cur.execute("SELECT * FROM trades WHERE strategy IN ('reversion', 'value_entry') ORDER BY ts DESC LIMIT 50")
                 columns = [desc[0] for desc in cur.description]
                 rows = [dict(zip(columns, row)) for row in cur.fetchall()]
             conn.close()

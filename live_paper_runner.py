@@ -1,8 +1,9 @@
 """
-Main run loop. Polls real Kalshi production market data, runs three signal
-detectors with per-event debounce, sizes positions via risk.py, executes
-through whatever broker config.ENVIRONMENT resolves to, and monitors open
-positions for take-profit/stop-loss exits every cycle.
+Tennis-only run loop (mean reversion + value entry). Split from the original
+combined runner so this bot's state is fully independent of the momentum
+(BTC) bot -- see momentum_runner.py. Redeploying either one no longer resets
+the other's accumulated balance/positions, which was a real cost every time
+BTC-specific changes went out before this split.
 
 Run: python live_paper_runner.py
 Stop any time with Ctrl+C -- open paper positions just stay open in the log,
@@ -19,10 +20,8 @@ import signals
 import risk
 import execution
 import kalshi_market_data as kmd
-import coinbase_data
 
 POLL_INTERVAL_SECONDS = 60
-CANDLE_LOOKBACK_MINUTES = 14  # KXBTC15M markets only live 15 min total; need 8 (6+2) for the detector, pad a bit
 
 _running = True
 
@@ -116,18 +115,7 @@ def run():
         # before this cycle's entry logic runs ---
         for pos in broker.get_open_positions_snapshot():
             try:
-                if pos.strategy == "momentum":
-                    series = pos.ticker.split("-")[0]
-                    now = int(time.time())
-                    candles = kmd.get_candlesticks(series, pos.ticker, now - 120, now, period_interval=1)
-                    if not candles:
-                        continue
-                    current_price = candles[-1]["price_cents"]
-                    exit_reason = risk.check_cents_exit(
-                        pos.direction, pos.entry_price_cents, current_price,
-                        config.MOMENTUM_TAKE_PROFIT_CENTS, config.MOMENTUM_STOP_LOSS_CENTS,
-                    )
-                elif pos.strategy == "reversion":
+                if pos.strategy == "reversion":
                     trades = kmd.get_recent_trades(pos.ticker, limit=5)
                     if not trades:
                         continue
@@ -161,80 +149,6 @@ def run():
                 print(f"[warn] exit check failed for {pos.ticker}: {e}")
 
         open_event_tickers = broker.get_open_event_tickers()
-
-        # --- Leg 1: crypto momentum ---
-        # Fetched once per cycle, not per-market -- it's the same underlying
-        # BTC price regardless of which KXBTC15M ticker is currently live.
-        try:
-            btc_trend = coinbase_data.get_btc_trend(lookback_minutes=config.MOMENTUM_BTC_LOOKBACK_MINUTES)
-        except Exception as e:
-            print(f"[warn] Coinbase BTC trend fetch failed, momentum leg will skip this cycle: {e}")
-            btc_trend = None
-
-        for series in config.CRYPTO_SERIES:
-            try:
-                markets = kmd.get_markets(series, status="open", limit=config.MAX_MARKETS_PER_SERIES)
-            except Exception as e:
-                print(f"[warn] couldn't fetch markets for {series}: {e}")
-                continue
-
-            for m in markets:
-                ticker = m["ticker"]
-                event_ticker = _derive_match_key(ticker)
-                if ticker in already_signaled_events:
-                    continue
-                if event_ticker in cooldown_until and time.time() < cooldown_until[event_ticker]:
-                    continue  # recently closed on this match -- cooling down before re-entry
-                allowed, reason = risk.can_open_new_position(broker.get_open_position_count(), open_event_tickers, event_ticker)
-                if not allowed:
-                    continue
-
-                now = int(time.time())
-                start_ts = now - CANDLE_LOOKBACK_MINUTES * 60
-                try:
-                    candles = kmd.get_candlesticks(series, ticker, start_ts, now, period_interval=1)
-                except Exception as e:
-                    print(f"[warn] candlesticks failed for {ticker}: {e}")
-                    continue
-
-                sig, diag = signals.detect_btc_trend_signal(btc_trend)
-                if diag.get("reason") != "signal_fired":
-                    # visibility into near-misses -- same principle as before,
-                    # now against the new trigger's own diagnostics
-                    if diag.get("pct_change") is not None:
-                        print(f"[momentum diag] {ticker}: coinbase_pct_change={diag['pct_change']*100:+.3f}% "
-                              f"(threshold {config.MOMENTUM_BTC_TREND_THRESHOLD_PCT*100:.2f}%) "
-                              f"direction={diag.get('direction')} reason={diag['reason']}")
-                    else:
-                        print(f"[momentum diag] {ticker}: reason={diag['reason']}")
-                if sig:
-                    # explicit liquidity check: a signal firing says nothing about
-                    # whether anyone's actually resting an order to trade against
-                    # right now. Only runs on an actual fire (rare), so the extra
-                    # orderbook call doesn't add to the steady-state rate-limit load.
-                    try:
-                        ob = kmd.get_orderbook(ticker)
-                        available = ob["best_yes_ask_size"] if sig.direction == "yes" else ob["best_no_ask_size"]
-                    except Exception as e:
-                        print(f"[warn] orderbook check failed for {ticker}, skipping momentum entry: {e}")
-                        continue
-                    if available < config.MOMENTUM_MIN_LIQUIDITY_CONTRACTS:
-                        print(f"[momentum diag] {ticker}: signal fired but liquidity too thin "
-                              f"({available:.0f} < {config.MOMENTUM_MIN_LIQUIDITY_CONTRACTS} contracts), skipping")
-                        continue
-
-                    already_signaled_events.add(ticker)
-                    current_price = candles[-1]["price_cents"] if candles else 50.0
-                    side_price = current_price if sig.direction == "yes" else (100 - current_price)
-                    win_prob = 0.5 + (sig.strength * 0.15)
-                    size = risk.position_size_dollars(
-                        broker.balance, win_prob,
-                        config.MOMENTUM_TAKE_PROFIT_CENTS, config.MOMENTUM_STOP_LOSS_CENTS,
-                        side_price_cents=side_price, market_title=m.get("title", ticker),
-                    )
-                    size = _apply_depth_cap(ticker, sig.direction, side_price, size)
-                    if size > 0:
-                        broker.open_position(ticker, event_ticker, sig.direction, current_price, size, sig.reason, strategy="momentum", market_title=m.get("title", ticker))
 
         # --- Leg 2: tennis mean reversion, Leg 3: tennis value entry ---
         for series in config.TENNIS_SERIES:
