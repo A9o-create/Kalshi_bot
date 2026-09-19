@@ -28,14 +28,18 @@ KALSHI_API_KEY_ID_ENV = "KALSHI_API_KEY_ID"
 KALSHI_PRIVATE_KEY_PATH_ENV = "KALSHI_PRIVATE_KEY_PATH"
 
 # --- Universe ---
-# KXBTC15M: "BTC price up in next 15 mins?" -- verified live against real
-# Kalshi ticker instances (e.g. KXBTC15M-26APR210945-45), resolves on a CF
-# Benchmarks BRTI average comparison. A single market only exists for 15
-# minutes total, which is why MOMENTUM_TRAILING_WINDOW_MINUTES/
-# MOMENTUM_CURRENT_WINDOW_MINUTES below are compressed way down from the
-# original 30/5 -- the old windows needed 35 minutes of history a 15-minute
-# market can never provide.
-CRYPTO_SERIES = ["KXBTC15M"]
+# KXBTCD: "Bitcoin price on {date}?" -- confirmed live against real Kalshi
+# ticker instances (e.g. KXBTCD-26APR2117-T79999.99, KXBTCD-26APR2109-T76399.99),
+# resolving on whether CF Benchmarks' BRTI average is ABOVE the ticker's
+# threshold at close. Unlike KXBTC15M (one market per window), KXBTCD lists
+# MULTIPLE simultaneous threshold ("strike") markets per close time -- a
+# ladder, not a single up/down bet. combined_runner.py's
+# _select_nearest_strike_market() picks whichever strike sits closest to
+# real spot price each cycle as the best proxy for the trend signal.
+# CONFIRMED: the ticker/threshold structure, via real examples. NOT fully
+# confirmed: exact recurrence cadence -- only two real close times observed
+# (9 AM and 5 PM EDT, 8 hours apart), not a verified full schedule.
+CRYPTO_SERIES = ["KXBTCD"]
 # KXITFWMATCH confirmed live/active against Kalshi's real market data.
 # KXITFMMATCH (men's) follows the same naming convention as the confirmed
 # tickers (KXATPMATCH/KXWTAMATCH -> KXITFWMATCH for women) but is INFERRED,

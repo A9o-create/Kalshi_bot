@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import config
 import kalshi_market_data
+import risk
 
 
 def kalshi_taker_fee_dollars(contracts: int, price_cents: float) -> float:
@@ -66,12 +67,18 @@ class PaperBroker:
     """
 
     def __init__(self, starting_balance: float = config.PAPER_STARTING_BALANCE_DOLLARS, log_path: str = "paper_trades.jsonl"):
+        import threading
         self.balance = starting_balance
         self.starting_balance = starting_balance
         self.daily_pnl = 0.0
         self.total_fees_paid = 0.0
         self.open_positions: dict[str, Position] = {}
         self.log_path = log_path
+        # Needed once this broker is shared across more than one loop/thread
+        # (the merged tennis+momentum process) -- unlike the original
+        # single-loop design, open_position/close_position/the accessors can
+        # now genuinely be called concurrently from two different threads.
+        self._lock = threading.Lock()
 
     def _simulated_fill_price(self, quoted_price_cents: float, direction: str, is_buy: bool) -> float:
         """
@@ -102,6 +109,38 @@ class PaperBroker:
         return self._simulated_fill_price(quoted_price_cents, direction, is_buy), False
 
     def open_position(self, ticker: str, event_ticker: str, direction: str, price_cents: float, size_dollars: float, reason: str, strategy: str = "", market_title: str = "") -> Position:
+        """
+        Unconditional open -- does NOT check MAX_CONCURRENT_POSITIONS or
+        per-event duplication. Safe to call directly when only one loop is
+        ever using this broker (the original single-bot design). Once a
+        broker is shared across multiple loops/threads, prefer
+        try_open_position() instead, which checks and opens atomically
+        under one lock -- calling risk.can_open_new_position() separately
+        beforehand leaves a race window between the check and this call.
+        """
+        with self._lock:
+            return self._open_position_locked(ticker, event_ticker, direction, price_cents, size_dollars, reason, strategy, market_title)
+
+    def try_open_position(self, ticker: str, event_ticker: str, direction: str, price_cents: float, size_dollars: float,
+                           reason: str, strategy: str = "", market_title: str = "") -> Optional[Position]:
+        """
+        Atomically checks risk.can_open_new_position() and opens under the
+        SAME lock, so two threads (e.g. tennis and momentum loops sharing
+        one broker) can't both pass the concurrency-cap check before either
+        one's position is actually recorded. Returns None if blocked by the
+        cap or an existing position in the same event; the caller doesn't
+        need to call can_open_new_position() separately beforehand.
+        """
+        with self._lock:
+            open_count = len(self.open_positions)
+            open_events = {p.event_ticker for p in self.open_positions.values()}
+            allowed, _reason = risk.can_open_new_position(open_count, open_events, event_ticker)
+            if not allowed:
+                return None
+            return self._open_position_locked(ticker, event_ticker, direction, price_cents, size_dollars, reason, strategy, market_title)
+
+    def _open_position_locked(self, ticker, event_ticker, direction, price_cents, size_dollars, reason, strategy, market_title) -> Position:
+        """Actual open logic -- callers must already hold self._lock."""
         fill_price, was_maker = self._simulate_execution(price_cents, direction, is_buy=True)
         contracts = max(1, int(size_dollars / (fill_price / 100.0)))
         fee = kalshi_maker_fee_dollars(contracts, fill_price) if was_maker else kalshi_taker_fee_dollars(contracts, fill_price)
@@ -127,28 +166,29 @@ class PaperBroker:
         return pos
 
     def close_position(self, ticker: str, exit_price_cents: float) -> float:
-        pos = self.open_positions.pop(ticker, None)
-        if pos is None:
-            return 0.0
+        with self._lock:
+            pos = self.open_positions.pop(ticker, None)
+            if pos is None:
+                return 0.0
 
-        fill_price, was_maker = self._simulate_execution(exit_price_cents, pos.direction, is_buy=False)
-        contracts = pos.filled_contracts or max(1, int(pos.size_dollars / (pos.entry_price_cents / 100.0)))
-        fee = kalshi_maker_fee_dollars(contracts, fill_price) if was_maker else kalshi_taker_fee_dollars(contracts, fill_price)
+            fill_price, was_maker = self._simulate_execution(exit_price_cents, pos.direction, is_buy=False)
+            contracts = pos.filled_contracts or max(1, int(pos.size_dollars / (pos.entry_price_cents / 100.0)))
+            fee = kalshi_maker_fee_dollars(contracts, fill_price) if was_maker else kalshi_taker_fee_dollars(contracts, fill_price)
 
-        # simplified P&L: for YES, profit if price went up; for NO, profit if price went down
-        price_delta = fill_price - pos.entry_price_cents
-        direction_multiplier = 1 if pos.direction == "yes" else -1
-        pnl_pct = (price_delta * direction_multiplier) / 100.0  # cents -> fraction of $1 contract
-        pnl_dollars = pos.size_dollars * pnl_pct - fee  # fee eats directly into realized P&L
+            # simplified P&L: for YES, profit if price went up; for NO, profit if price went down
+            price_delta = fill_price - pos.entry_price_cents
+            direction_multiplier = 1 if pos.direction == "yes" else -1
+            pnl_pct = (price_delta * direction_multiplier) / 100.0  # cents -> fraction of $1 contract
+            pnl_dollars = pos.size_dollars * pnl_pct - fee  # fee eats directly into realized P&L
 
-        self.balance += pnl_dollars
-        self.daily_pnl += pnl_dollars
-        self.total_fees_paid += fee
-        self._log({"action": "close", "ticker": ticker, "strategy": pos.strategy, "market_title": pos.market_title, "direction": pos.direction,
-                   "quoted_exit_price_cents": exit_price_cents,
-                   "fill_price_cents": fill_price, "was_maker": was_maker, "fee_dollars": fee,
-                   "pnl_dollars": round(pnl_dollars, 2), "balance_after": round(self.balance, 2)})
-        return pnl_dollars
+            self.balance += pnl_dollars
+            self.daily_pnl += pnl_dollars
+            self.total_fees_paid += fee
+            self._log({"action": "close", "ticker": ticker, "strategy": pos.strategy, "market_title": pos.market_title, "direction": pos.direction,
+                       "quoted_exit_price_cents": exit_price_cents,
+                       "fill_price_cents": fill_price, "was_maker": was_maker, "fee_dollars": fee,
+                       "pnl_dollars": round(pnl_dollars, 2), "balance_after": round(self.balance, 2)})
+            return pnl_dollars
 
     def _log(self, record: dict):
         record["ts"] = time.time()
@@ -166,13 +206,16 @@ class PaperBroker:
     # need to branch on which broker it's talking to) ---
 
     def get_open_position_count(self) -> int:
-        return len(self.open_positions)
+        with self._lock:
+            return len(self.open_positions)
 
     def get_open_event_tickers(self) -> set[str]:
-        return {p.event_ticker for p in self.open_positions.values()}
+        with self._lock:
+            return {p.event_ticker for p in self.open_positions.values()}
 
     def get_open_positions_snapshot(self) -> list:
-        return list(self.open_positions.values())
+        with self._lock:
+            return list(self.open_positions.values())
 
     def shutdown(self, wait: bool = True):
         pass  # nothing to clean up in paper mode
