@@ -148,8 +148,6 @@ def run():
             except Exception as e:
                 print(f"[warn] exit check failed for {pos.ticker}: {e}")
 
-        open_event_tickers = broker.get_open_event_tickers()
-
         # --- Leg 2: tennis mean reversion, Leg 3: tennis value entry ---
         for series in config.TENNIS_SERIES:
             try:
@@ -165,6 +163,12 @@ def run():
                     continue
                 if event_ticker in cooldown_until and time.time() < cooldown_until[event_ticker]:
                     continue  # recently closed on this match -- cooling down before re-entry
+                # pulled fresh on every ticker (not cached once per cycle) so a
+                # paired ticker opened earlier in THIS SAME cycle is already
+                # reflected here -- this is the fix for the same-cycle pairing
+                # bug: a stale once-per-cycle snapshot let both sides of one
+                # match open before either was visible to the other's check.
+                open_event_tickers = broker.get_open_event_tickers()
                 allowed, reason = risk.can_open_new_position(broker.get_open_position_count(), open_event_tickers, event_ticker)
                 if not allowed:
                     continue
@@ -203,10 +207,6 @@ def run():
                     size = _apply_depth_cap(ticker, sig.direction, side_price, size)
                     if size > 0:
                         broker.open_position(ticker, event_ticker, sig.direction, current_price, size, sig.reason, strategy="reversion", market_title=m.get("title", ticker))
-                        # keep the in-cycle snapshot live: without this, a paired
-                        # ticker checked later in this same loop still sees the
-                        # pre-cycle snapshot and can open the other side too
-                        open_event_tickers.add(event_ticker)
                     continue  # don't also try leg 3 on a market we just entered via leg 2
 
                 # Leg 3: value entry (early match, buy the cheap side)
@@ -224,7 +224,6 @@ def run():
                     size = _apply_depth_cap(ticker, sig.direction, side_price, size)
                     if size > 0:
                         broker.open_position(ticker, event_ticker, sig.direction, current_price, size, sig.reason, strategy="value_entry", market_title=m.get("title", ticker))
-                        open_event_tickers.add(event_ticker)
 
         open_count = broker.get_open_position_count()
         print(f"[cycle done] balance=${broker.balance:.2f} open_positions={open_count}")
