@@ -150,6 +150,41 @@ def _select_nearest_strike_market(markets: list, spot_price_dollars: float):
     return best_market
 
 
+def _check_market_settled(ticker: str):
+    """
+    Checks Kalshi's own market status directly, rather than guessing from a
+    holding-time timer. Neither loop otherwise has any way to know a
+    market closed if price never moved enough to hit take-profit or
+    stop-loss on its own -- real evidence found Sep 20: three momentum
+    positions sat "open" in our tracking for 18-25+ hours after their
+    KXBTCD windows had almost certainly already settled, silently eating
+    into MAX_CONCURRENT_POSITIONS with no way to ever naturally close.
+
+    Returns (is_settled: bool, resolved_price_cents: float | None).
+    resolved_price_cents is 100.0 if the market determined 'yes', 0.0 if
+    'no', None if settled but the result isn't available yet (caller should
+    still force-close using the last known price rather than wait
+    indefinitely) or if the status check itself failed (fails open --
+    treated as NOT settled, so a transient API error can't block a normal
+    price-based exit).
+    """
+    try:
+        market = kmd.get_market(ticker)
+        status = market.get("status")
+        if status in ("active", "initialized", None):
+            return False, None
+        result = market.get("result")
+        if result == "yes":
+            return True, 100.0
+        elif result == "no":
+            return True, 0.0
+        else:
+            return True, None  # closed/determined but no result yet -- still force-close
+    except Exception as e:
+        print(f"[warn] settlement check failed for {ticker}: {e}")
+        return False, None  # fail open -- never block a normal price-based exit
+
+
 def tennis_loop(broker):
     """Mean reversion + value entry. Runs in its own thread against the shared broker."""
     already_signaled_events: set[str] = set()
@@ -175,6 +210,15 @@ def tennis_loop(broker):
                         continue
                     current_price = trades[-1]["yes_price_cents"]
                     exit_reason = risk.check_value_entry_exit(pos.direction, pos.entry_price_cents, current_price)
+
+                is_settled, resolved_price = _check_market_settled(pos.ticker)
+                if is_settled:
+                    close_price = resolved_price if resolved_price is not None else current_price
+                    print(f"[exit] {pos.ticker} ({pos.strategy}): market_settled (closing at {close_price:.0f}c)")
+                    broker.close_position(pos.ticker, close_price)
+                    already_signaled_events.discard(pos.ticker)
+                    cooldown_until[pos.event_ticker] = time.time() + config.REENTRY_COOLDOWN_SECONDS
+                    continue
 
                 if exit_reason:
                     side_price = current_price if pos.direction == "yes" else (100 - current_price)
@@ -283,6 +327,16 @@ def momentum_loop(broker):
                     pos.direction, pos.entry_price_cents, current_price,
                     config.MOMENTUM_TAKE_PROFIT_CENTS, config.MOMENTUM_STOP_LOSS_CENTS,
                 )
+
+                is_settled, resolved_price = _check_market_settled(pos.ticker)
+                if is_settled:
+                    close_price = resolved_price if resolved_price is not None else current_price
+                    print(f"[exit] {pos.ticker} ({pos.strategy}): market_settled (closing at {close_price:.0f}c)")
+                    broker.close_position(pos.ticker, close_price)
+                    already_signaled_events.discard(pos.ticker)
+                    cooldown_until[pos.event_ticker] = time.time() + config.REENTRY_COOLDOWN_SECONDS
+                    continue
+
                 if exit_reason:
                     side_price = current_price if pos.direction == "yes" else (100 - current_price)
                     if exit_reason == "take_profit" and side_price >= config.SETTLEMENT_HOLD_THRESHOLD_CENTS:

@@ -92,6 +92,35 @@ def get_markets(series_ticker: str, status: str = "open", limit: int = 50) -> li
         raise
 
 
+def get_market(ticker: str) -> dict:
+    """
+    GET /markets/{ticker} -- a single market's current state, including
+    `status` ('active' -> 'closed' -> 'determined' -> 'finalized', per
+    Kalshi's own market lifecycle docs) and `result` ('yes'/'no'/None) once
+    determined. Used to detect when a held position's market has actually
+    settled on Kalshi's side, since neither loop otherwise has any way to
+    know a market closed if price never moved enough to hit take-profit or
+    stop-loss on its own. Cached for MARKETS_CACHE_TTL_SECONDS, same
+    reasoning as get_markets() -- a single market's status doesn't need a
+    fresh fetch every single cycle either.
+    """
+    key = ("single", ticker)
+    now = time.time()
+    cached = _markets_cache.get(key)
+    if cached and (now - cached[0]) < config.MARKETS_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    try:
+        resp = _get(f"{_base_url()}/markets/{ticker}")
+        market = resp.json().get("market", {})
+        _markets_cache[key] = (now, market)
+        return market
+    except Exception:
+        if cached:
+            return cached[1]
+        raise
+
+
 def get_recent_trades(ticker: str, limit: int = 100, min_ts: int = None) -> list[dict]:
     params = {"ticker": ticker, "limit": limit}
     if min_ts is not None:

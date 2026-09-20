@@ -102,8 +102,8 @@ REVERSION_STOP_LOSS_CENTS = 8            # widened from 6c
 # "Beginning of the match" is a proxy: within this many minutes of the
 # market's first observed trade. Kalshi doesn't expose match clock/score.
 VALUE_ENTRY_MAX_MARKET_AGE_MINUTES = 15
-VALUE_ENTRY_TAKE_PROFIT_MIN_PCT = 0.20   # widened from 0.15 -- same fee-floor reasoning
-VALUE_ENTRY_TAKE_PROFIT_MAX_PCT = 0.30   # widened from 0.25
+VALUE_ENTRY_TAKE_PROFIT_MIN_PCT = 0.25   # was 0.20, +25% -- modest bump, requested directly, not yet backed by real win-rate data
+VALUE_ENTRY_TAKE_PROFIT_MAX_PCT = 0.375  # was 0.30, +25% -- same proportional increase, keeps the min-to-max spread ratio unchanged
 VALUE_ENTRY_STOP_LOSS_PCT = 0.15         # left as-is: the risk side of the ratio, not the fee side
 
 # --- Entry price favorability ---
