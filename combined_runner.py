@@ -192,7 +192,7 @@ def tennis_loop(broker):
 
     while _running:
         for pos in broker.get_open_positions_snapshot():
-            if pos.strategy not in ("reversion", "value_entry"):
+            if pos.strategy not in ("reversion", "value_entry", "favorite_entry"):
                 continue  # not this loop's position -- momentum_loop owns it
             try:
                 if pos.strategy == "reversion":
@@ -204,12 +204,18 @@ def tennis_loop(broker):
                         pos.direction, pos.entry_price_cents, current_price,
                         config.REVERSION_TAKE_PROFIT_CENTS, config.REVERSION_STOP_LOSS_CENTS,
                     )
-                else:  # value_entry
+                elif pos.strategy == "value_entry":
                     trades = kmd.get_recent_trades(pos.ticker, limit=5)
                     if not trades:
                         continue
                     current_price = trades[-1]["yes_price_cents"]
                     exit_reason = risk.check_value_entry_exit(pos.direction, pos.entry_price_cents, current_price)
+                else:  # favorite_entry
+                    trades = kmd.get_recent_trades(pos.ticker, limit=5)
+                    if not trades:
+                        continue
+                    current_price = trades[-1]["yes_price_cents"]
+                    exit_reason = risk.check_favorite_entry_exit(pos.direction, pos.entry_price_cents, current_price)
 
                 is_settled, resolved_price = _check_market_settled(pos.ticker)
                 if is_settled:
@@ -281,6 +287,24 @@ def tennis_loop(broker):
                     continue
 
                 age = _market_age_seconds(trades)
+
+                sig = signals.detect_favorite_entry_signal(trades, age)
+                if sig:
+                    current_price = trades[-1]["yes_price_cents"]
+                    side_price = current_price if sig.direction == "yes" else (100 - current_price)
+                    win_prob = 0.55
+                    win_cents = side_price * config.FAVORITE_ENTRY_TAKE_PROFIT_MIN_PCT
+                    loss_cents = side_price * config.FAVORITE_ENTRY_STOP_LOSS_PCT
+                    size = risk.position_size_dollars(broker.balance, win_prob, win_cents, loss_cents,
+                                                       side_price_cents=side_price, market_title=m.get("title", ticker))
+                    size = _apply_depth_cap(ticker, sig.direction, side_price, size)
+                    if size > 0:
+                        opened = broker.try_open_position(ticker, event_ticker, sig.direction, current_price, size,
+                                                           sig.reason, strategy="favorite_entry", market_title=m.get("title", ticker))
+                        if opened:
+                            already_signaled_events.add(ticker)
+                    continue
+
                 sig = signals.detect_value_entry_signal(trades, age, market_title=m.get("title"))
                 if sig:
                     current_price = trades[-1]["yes_price_cents"]

@@ -145,3 +145,30 @@ def check_value_entry_exit(direction: str, entry_yes_price_cents: float, current
     if pct_change <= -config.VALUE_ENTRY_STOP_LOSS_PCT:
         return "stop_loss"
     return None
+
+
+def check_favorite_entry_exit(direction: str, entry_yes_price_cents: float, current_yes_price_cents: float) -> Optional[str]:
+    """
+    For leg 4 (favorite entry): same percent-of-held-side structure as
+    check_value_entry_exit, but against FAVORITE_ENTRY_* thresholds --
+    kept as a separate function (not a shared one with extra parameters)
+    so this leg's thresholds can be tuned independently later, same
+    pattern as every other leg having its own dedicated config.
+    """
+    if direction == "yes":
+        entry_side_price = entry_yes_price_cents
+        current_side_price = current_yes_price_cents
+    else:
+        entry_side_price = 100 - entry_yes_price_cents
+        current_side_price = 100 - current_yes_price_cents
+
+    if entry_side_price <= 0:
+        return None
+
+    pct_change = (current_side_price - entry_side_price) / entry_side_price
+
+    if pct_change >= config.FAVORITE_ENTRY_TAKE_PROFIT_MIN_PCT:
+        return "take_profit"
+    if pct_change <= -config.FAVORITE_ENTRY_STOP_LOSS_PCT:
+        return "stop_loss"
+    return None

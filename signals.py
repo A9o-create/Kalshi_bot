@@ -314,3 +314,35 @@ def detect_value_entry_signal(trades: List[dict], market_age_seconds: float, mar
     else:
         no_price = 100 - yes_price
         return Signal(direction="no", reason=f"early value entry: no cheap at {no_price:.0f}c")
+
+
+def detect_favorite_entry_signal(trades: List[dict], market_age_seconds: float) -> Optional[Signal]:
+    """
+    Leg 4: buy the FAVORITE (whichever side has the higher implied win
+    probability), but only within a very tight window of the market's
+    first observed trade -- a proxy for "the moment Kalshi moved this
+    match to active," since Kalshi doesn't expose a direct activation
+    event. Deliberately much tighter than value_entry's 15-minute window
+    (FAVORITE_ENTRY_MAX_MARKET_AGE_SECONDS, seconds not minutes) since the
+    whole point is catching the market's initial read before the match's
+    own action has a chance to move the price.
+
+    Opposite thesis from value_entry: instead of betting on early
+    mispricing favoring the underdog, bets the market's initial pricing
+    (often informed by seeding/ranking/recent form) is worth taking
+    immediately. Exit is percentage-based, same pattern as value_entry.
+    """
+    if not trades:
+        return None
+    if market_age_seconds > config.FAVORITE_ENTRY_MAX_MARKET_AGE_SECONDS:
+        return None
+
+    yes_price = trades[-1]["yes_price_cents"]
+    if yes_price <= 0 or yes_price >= 100:
+        return None  # degenerate price, nothing to trade
+
+    if yes_price >= 50:
+        return Signal(direction="yes", reason=f"match just active: yes favored at {yes_price:.0f}c")
+    else:
+        no_price = 100 - yes_price
+        return Signal(direction="no", reason=f"match just active: no favored at {no_price:.0f}c")

@@ -106,6 +106,23 @@ VALUE_ENTRY_TAKE_PROFIT_MIN_PCT = 0.25   # was 0.20, +25% -- modest bump, reques
 VALUE_ENTRY_TAKE_PROFIT_MAX_PCT = 0.375  # was 0.30, +25% -- same proportional increase, keeps the min-to-max spread ratio unchanged
 VALUE_ENTRY_STOP_LOSS_PCT = 0.15         # left as-is: the risk side of the ratio, not the fee side
 
+# --- Leg 4: favorite entry (buy the favorite the moment a match goes active) ---
+# Opposite thesis from value_entry: instead of betting on early mispricing
+# favoring the underdog, bet the market's own initial read (often informed
+# by seeding/ranking/recent form) is worth taking immediately, before the
+# match's own action moves the price.
+# "Just went active" is proxied by a TIGHT market-age window -- far
+# tighter than value_entry's 15-min "early in match" window -- since
+# Kalshi doesn't expose a direct activation event; this is the earliest
+# reliably detectable point via trade history alone.
+FAVORITE_ENTRY_MAX_MARKET_AGE_SECONDS = 120
+# Starting from the same percentage framework as value_entry (already
+# fee-floor calibrated) rather than untested numbers -- easy to tune
+# independently later since this is its own dedicated config.
+FAVORITE_ENTRY_TAKE_PROFIT_MIN_PCT = 0.25
+FAVORITE_ENTRY_TAKE_PROFIT_MAX_PCT = 0.375
+FAVORITE_ENTRY_STOP_LOSS_PCT = 0.15
+
 # --- Entry price favorability ---
 # Prices near 50c carry the highest fee (fee = 0.07 * P * (1-P), peaks at
 # P=0.5) and are a coin flip by construction. Deep longshots (<35c) are
