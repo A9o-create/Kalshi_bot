@@ -218,12 +218,30 @@ def _check_market_settled(ticker: str):
         return False, None  # fail open -- never block a normal price-based exit
 
 
+def _should_halt(broker):
+    """
+    Checks all three account-level halt conditions together: net daily
+    loss cap, absolute balance floor, and peak-drawdown. Returns
+    (should_halt: bool, reason: str | None). Shared by both loops, checked
+    both at the top of each cycle and immediately after every position
+    close, so reaction time isn't limited to once per ~60-90s cycle.
+    """
+    if risk.daily_loss_breached(broker.daily_pnl, broker.starting_balance):
+        return True, f"daily loss cap breached (pnl=${broker.daily_pnl:.2f}, cap={config.DAILY_LOSS_CAP_PCT*100:.0f}%)"
+    if risk.hard_balance_floor_breached(broker.balance):
+        return True, f"hard balance floor breached (balance=${broker.balance:.2f}, floor=${config.MIN_BALANCE_DOLLARS:.2f})"
+    if risk.drawdown_from_peak_breached(broker.daily_pnl, broker.peak_daily_pnl, broker.starting_balance):
+        return True, f"peak drawdown breached (pnl=${broker.daily_pnl:.2f}, peak=${broker.peak_daily_pnl:.2f}, cap={config.PEAK_DRAWDOWN_CAP_PCT*100:.0f}%)"
+    return False, None
+
+
 def tennis_loop(broker):
     """Mean reversion + value entry. Runs in its own thread against the shared broker."""
     already_signaled_events: set[str] = set()
     cooldown_until: dict[str, float] = {}
 
     while _running:
+        halted = False
         for pos in broker.get_open_positions_snapshot():
             if pos.strategy not in ("reversion", "value_entry", "favorite_entry"):
                 continue  # not this loop's position -- momentum_loop owns it
@@ -257,6 +275,11 @@ def tennis_loop(broker):
                     broker.close_position(pos.ticker, close_price)
                     already_signaled_events.discard(pos.ticker)
                     cooldown_until[pos.event_ticker] = time.time() + config.REENTRY_COOLDOWN_SECONDS
+                    should_halt, halt_reason = _should_halt(broker)
+                    if should_halt:
+                        print(f"[HALT] tennis_loop stopping: {halt_reason}")
+                        halted = True
+                        break
                     continue
 
                 if exit_reason:
@@ -268,8 +291,23 @@ def tennis_loop(broker):
                     broker.close_position(pos.ticker, current_price)
                     already_signaled_events.discard(pos.ticker)
                     cooldown_until[pos.event_ticker] = time.time() + config.REENTRY_COOLDOWN_SECONDS
+                    should_halt, halt_reason = _should_halt(broker)
+                    if should_halt:
+                        print(f"[HALT] tennis_loop stopping: {halt_reason}")
+                        halted = True
+                        break
             except Exception as e:
                 print(f"[warn] tennis exit check failed for {pos.ticker}: {e}")
+
+        if halted:
+            break
+
+        # gate the entry phase specifically -- exits above always get a chance
+        # to complete for this cycle even if a threshold was just breached
+        should_halt, halt_reason = _should_halt(broker)
+        if should_halt:
+            print(f"[HALT] tennis_loop stopping: {halt_reason}")
+            break
 
         for series in config.TENNIS_SERIES:
             try:
@@ -370,6 +408,7 @@ def momentum_loop(broker):
     cooldown_until: dict[str, float] = {}
 
     while _running:
+        halted = False
         for pos in broker.get_open_positions_snapshot():
             if pos.strategy != "momentum":
                 continue  # not this loop's position -- tennis_loop owns it
@@ -392,6 +431,11 @@ def momentum_loop(broker):
                     broker.close_position(pos.ticker, close_price)
                     already_signaled_events.discard(pos.ticker)
                     cooldown_until[pos.event_ticker] = time.time() + config.REENTRY_COOLDOWN_SECONDS
+                    should_halt, halt_reason = _should_halt(broker)
+                    if should_halt:
+                        print(f"[HALT] momentum_loop stopping: {halt_reason}")
+                        halted = True
+                        break
                     continue
 
                 if exit_reason:
@@ -403,8 +447,21 @@ def momentum_loop(broker):
                     broker.close_position(pos.ticker, current_price)
                     already_signaled_events.discard(pos.ticker)
                     cooldown_until[pos.event_ticker] = time.time() + config.REENTRY_COOLDOWN_SECONDS
+                    should_halt, halt_reason = _should_halt(broker)
+                    if should_halt:
+                        print(f"[HALT] momentum_loop stopping: {halt_reason}")
+                        halted = True
+                        break
             except Exception as e:
                 print(f"[warn] momentum exit check failed for {pos.ticker}: {e}")
+
+        if halted:
+            break
+
+        should_halt, halt_reason = _should_halt(broker)
+        if should_halt:
+            print(f"[HALT] momentum_loop stopping: {halt_reason}")
+            break
 
         try:
             btc_trend = coinbase_data.get_btc_trend(lookback_minutes=config.MOMENTUM_BTC_LOOKBACK_MINUTES)

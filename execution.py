@@ -71,6 +71,10 @@ class PaperBroker:
         self.balance = starting_balance
         self.starting_balance = starting_balance
         self.daily_pnl = 0.0
+        self.peak_daily_pnl = 0.0  # high-water mark for the session, tracked for
+                                    # peak-drawdown protection -- separate from the
+                                    # flat daily loss cap, which only looks at NET
+                                    # loss from the start, not from a peak
         self.total_fees_paid = 0.0
         self.open_positions: dict[str, Position] = {}
         self.log_path = log_path
@@ -183,6 +187,7 @@ class PaperBroker:
 
             self.balance += pnl_dollars
             self.daily_pnl += pnl_dollars
+            self.peak_daily_pnl = max(self.peak_daily_pnl, self.daily_pnl)
             self.total_fees_paid += fee
             self._log({"action": "close", "ticker": ticker, "strategy": pos.strategy, "market_title": pos.market_title, "direction": pos.direction,
                        "quoted_exit_price_cents": exit_price_cents,

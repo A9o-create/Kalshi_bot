@@ -90,6 +90,37 @@ def daily_loss_breached(daily_pnl: float, starting_balance: float) -> bool:
     return daily_pnl <= -(starting_balance * config.DAILY_LOSS_CAP_PCT)
 
 
+def hard_balance_floor_breached(current_balance: float) -> bool:
+    """
+    True if live balance has fallen to or below MIN_BALANCE_DOLLARS -- an
+    absolute floor, independent of the percentage-based daily_loss_breached
+    check above. Exists because that check has two real gaps: it's measured
+    against a FIXED starting_balance (not the live, moving balance), and
+    it's only evaluated once per full cycle, not immediately after each
+    individual position close. This uses the live balance directly and is
+    meant to be checked as close to every closing event as practical, as a
+    genuine last-resort guarantee against ever reaching zero or negative,
+    regardless of what the percentage math says.
+    """
+    return current_balance <= config.MIN_BALANCE_DOLLARS
+
+
+def drawdown_from_peak_breached(daily_pnl: float, peak_daily_pnl: float, starting_balance: float) -> bool:
+    """
+    True if the session has given back too much from its own intraday peak
+    -- distinct from daily_loss_breached, which only checks NET loss from
+    the starting balance. A session that runs up +15% and gives back 24%
+    of that (landing around -9% net) would NOT trip daily_loss_breached at
+    an 18% cap, despite a 39-point peak-to-trough swing. This catches that
+    case by tracking the high-water mark (peak_daily_pnl) and halting once
+    the pullback from it exceeds PEAK_DRAWDOWN_CAP_PCT of starting balance.
+    """
+    if starting_balance <= 0:
+        return True
+    drawdown = peak_daily_pnl - daily_pnl
+    return drawdown >= (starting_balance * config.PEAK_DRAWDOWN_CAP_PCT)
+
+
 def can_open_new_position(open_position_count: int, open_events: set, event_ticker: str) -> tuple[bool, str]:
     """Checks concurrency and per-event exposure limits. Returns (allowed, reason_if_not)."""
     if open_position_count >= config.MAX_CONCURRENT_POSITIONS:
