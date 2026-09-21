@@ -54,6 +54,14 @@ MOMENTUM_CANDLE_LOOKBACK_MINUTES = 30
 # so a bigger limit doesn't proportionally increase live request volume.
 MOMENTUM_STRIKE_LADDER_FETCH_LIMIT = 20
 
+# Series that list multiple simultaneous threshold/strike markets for the
+# same close time (need _select_strike_candidates()'s nearest-to-spot
+# selection). Any CRYPTO_SERIES entry NOT in this set is treated as a
+# simple series -- exactly one open market at a time, no strike to choose
+# between (e.g. KXBTC15M) -- and every open market becomes a direct
+# candidate as-is, skipping strike-parsing entirely.
+LADDER_SERIES = {"KXBTCD"}
+
 _running = True
 
 # Combined status snapshot -- both loops write their own sub-dict, so
@@ -413,10 +421,15 @@ def momentum_loop(broker):
             if not markets or btc_trend is None:
                 continue
 
-            candidates = _select_strike_candidates(markets, btc_trend["current_price"])
-            if not candidates:
-                print(f"[momentum diag] {series}: no parseable strike found in {len(markets)} markets, skipping")
-                continue
+            if series in LADDER_SERIES:
+                candidates = _select_strike_candidates(markets, btc_trend["current_price"])
+                if not candidates:
+                    print(f"[momentum diag] {series}: no parseable strike found in {len(markets)} markets, skipping")
+                    continue
+            else:
+                # simple series (e.g. KXBTC15M): exactly one market per window,
+                # no strike to choose -- every open market is a direct candidate
+                candidates = markets
 
             # the trend signal doesn't depend on which specific strike we're
             # looking at -- check it once, not once per candidate

@@ -34,12 +34,27 @@ KALSHI_PRIVATE_KEY_PATH_ENV = "KALSHI_PRIVATE_KEY_PATH"
 # threshold at close. Unlike KXBTC15M (one market per window), KXBTCD lists
 # MULTIPLE simultaneous threshold ("strike") markets per close time -- a
 # ladder, not a single up/down bet. combined_runner.py's
-# _select_nearest_strike_market() picks whichever strike sits closest to
-# real spot price each cycle as the best proxy for the trend signal.
+# _select_strike_candidates() picks whichever strikes sit closest to real
+# spot price each cycle as the best proxy for the trend signal.
 # CONFIRMED: the ticker/threshold structure, via real examples. NOT fully
 # confirmed: exact recurrence cadence -- only two real close times observed
 # (9 AM and 5 PM EDT, 8 hours apart), not a verified full schedule.
-CRYPTO_SERIES = ["KXBTCD"]
+#
+# KXBTC15M: "BTC price up in next 15 mins?" -- re-added alongside KXBTCD
+# (Sep 21) once the actual blocker was fixed as a side effect of the
+# KXBTCD redesign. The original failure was structural: the OLD trigger
+# needed Kalshi's own volume/price history to build up over a 30-then-6
+# minute window, and a market living only 15 minutes could never
+# accumulate enough (confirmed across 5 full windows, zero exceptions).
+# The current trigger is 100% Coinbase-driven and needs no Kalshi-side
+# history at all, so that constraint no longer applies. Re-added
+# specifically for polling consistency -- KXBTCD windows can run for
+# hours with nothing new to evaluate; KXBTC15M generates a fresh
+# opportunity every 15 minutes, all day, filling that gap. Single market
+# per window (no ladder, no strike to pick) -- combined_runner.py treats
+# it as a simple series, completely separate code path from KXBTCD's
+# strike-selection logic.
+CRYPTO_SERIES = ["KXBTCD", "KXBTC15M"]
 # KXITFWMATCH confirmed live/active against Kalshi's real market data.
 # KXITFMMATCH (men's) follows the same naming convention as the confirmed
 # tickers (KXATPMATCH/KXWTAMATCH -> KXITFWMATCH for women) but is INFERRED,
