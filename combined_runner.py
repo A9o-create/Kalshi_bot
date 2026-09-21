@@ -79,9 +79,29 @@ def _derive_match_key(ticker: str) -> str:
     from the ticker string, rather than trusting Kalshi's own event_ticker
     field (which doesn't reliably group paired per-player markets for the
     same tennis match). Strips the final "-XXX" segment.
+
+    Tennis-specific: two tickers sharing this key ARE genuinely
+    correlated/redundant bets (opposite sides of the same match). Do NOT
+    use for momentum/KXBTCD -- every strike in the same window would
+    collapse to the same key, blocking simultaneous holds of different
+    strikes even though they're distinct bets. See _momentum_event_key().
     """
     parts = ticker.rsplit("-", 1)
     return parts[0] if len(parts) > 1 else ticker
+
+
+def _momentum_event_key(ticker: str) -> str:
+    """
+    Unlike _derive_match_key(), does NOT collapse to a shared window
+    prefix -- each strike is its own independent event. Real data (Sep 21)
+    showed the leg going idle for hours holding one strike with no
+    fallback; the fallback added to fix that only works if different
+    strikes of the same window can actually be held simultaneously,
+    rather than blocked by tennis's pairing protection. Still fully
+    prevents re-entering the EXACT SAME strike (the ticker itself is the
+    key), just not other strikes of the same window.
+    """
+    return ticker
 
 
 def _apply_depth_cap(ticker: str, direction: str, side_price: float, size: float) -> float:
@@ -123,13 +143,20 @@ def _parse_strike_threshold(ticker: str):
     return None
 
 
-def _select_nearest_strike_market(markets: list, spot_price_dollars: float):
+def _select_strike_candidates(markets: list, spot_price_dollars: float) -> list:
     """
     KXBTCD lists multiple simultaneous 'above $X' threshold markets for the
     same close time -- unlike KXBTC15M, which was a single market per
-    window. Picks whichever strike sits closest to current spot price as
-    the best available proxy for "will price be up or down from here,"
-    the same bet KXBTC15M represented directly.
+    window. Returns every parseable strike sorted nearest-to-spot first,
+    the best available proxy for "will price be up or down from here," the
+    same bet KXBTC15M represented directly.
+
+    Returns a LIST (not just the single nearest) so the caller can fall
+    through to the next-nearest strike when the top pick is already held --
+    real data (Sep 21) showed the leg going fully idle for hours once its
+    one nearest-strike position was open, since there was no fallback and
+    the debounce check silently skipped every cycle after with no
+    diagnostic at all.
 
     Known, deliberately unresolved tradeoff: the nearest-to-spot strike is
     also the one closest to 50c -- Kalshi's highest-fee price zone (fee
@@ -137,17 +164,15 @@ def _select_nearest_strike_market(markets: list, spot_price_dollars: float):
     the most economically honest translation of the trend signal, but not
     necessarily the most fee-efficient choice. Flagged, not fixed here.
     """
-    best_market = None
-    best_distance = None
+    candidates = []
     for m in markets:
         threshold = _parse_strike_threshold(m["ticker"])
         if threshold is None:
             continue
         distance = abs(threshold - spot_price_dollars)
-        if best_distance is None or distance < best_distance:
-            best_distance = distance
-            best_market = m
-    return best_market
+        candidates.append((distance, m))
+    candidates.sort(key=lambda pair: pair[0])
+    return [m for _, m in candidates]
 
 
 def _check_market_settled(ticker: str):
@@ -388,44 +413,56 @@ def momentum_loop(broker):
             if not markets or btc_trend is None:
                 continue
 
-            m = _select_nearest_strike_market(markets, btc_trend["current_price"])
-            if m is None:
+            candidates = _select_strike_candidates(markets, btc_trend["current_price"])
+            if not candidates:
                 print(f"[momentum diag] {series}: no parseable strike found in {len(markets)} markets, skipping")
                 continue
 
-            ticker = m["ticker"]
-            event_ticker = _derive_match_key(ticker)
-            if ticker in already_signaled_events:
-                continue
-            if event_ticker in cooldown_until and time.time() < cooldown_until[event_ticker]:
-                continue
-
-            now = int(time.time())
-            start_ts = now - MOMENTUM_CANDLE_LOOKBACK_MINUTES * 60
-            try:
-                candles = kmd.get_candlesticks(series, ticker, start_ts, now, period_interval=1)
-            except Exception as e:
-                print(f"[warn] candlesticks failed for {ticker}: {e}")
-                continue
-
+            # the trend signal doesn't depend on which specific strike we're
+            # looking at -- check it once, not once per candidate
             sig, diag = signals.detect_btc_trend_signal(btc_trend)
             if diag.get("reason") != "signal_fired":
                 if diag.get("pct_change") is not None:
-                    print(f"[momentum diag] {ticker}: coinbase_pct_change={diag['pct_change']*100:+.3f}% "
+                    print(f"[momentum diag] {series}: coinbase_pct_change={diag['pct_change']*100:+.3f}% "
                           f"(threshold {config.MOMENTUM_BTC_TREND_THRESHOLD_PCT*100:.2f}%) "
                           f"direction={diag.get('direction')} reason={diag['reason']}")
                 else:
-                    print(f"[momentum diag] {ticker}: reason={diag['reason']}")
-            if sig:
+                    print(f"[momentum diag] {series}: reason={diag['reason']}")
+                continue
+
+            # signal fired -- try each candidate strike nearest-to-farthest, falling
+            # through to the next one on ANY failure (already held, cooling down, thin
+            # liquidity, or blocked by try_open_position's own authoritative check --
+            # not just the cheap local pre-filter, which could in principle desync
+            # from the real broker state). Stops at the first successful open.
+            opened_position = None
+            attempted_any = False
+            for candidate in candidates:
+                cand_ticker = candidate["ticker"]
+                cand_event = _momentum_event_key(cand_ticker)
+                if cand_ticker in already_signaled_events:
+                    continue
+                if cand_event in cooldown_until and time.time() < cooldown_until[cand_event]:
+                    continue
+                attempted_any = True
+
                 try:
-                    ob = kmd.get_orderbook(ticker)
+                    ob = kmd.get_orderbook(cand_ticker)
                     available = ob["best_yes_ask_size"] if sig.direction == "yes" else ob["best_no_ask_size"]
                 except Exception as e:
-                    print(f"[warn] orderbook check failed for {ticker}, skipping momentum entry: {e}")
+                    print(f"[warn] orderbook check failed for {cand_ticker}, trying next candidate: {e}")
                     continue
                 if available < config.MOMENTUM_MIN_LIQUIDITY_CONTRACTS:
-                    print(f"[momentum diag] {ticker}: signal fired but liquidity too thin "
-                          f"({available:.0f} < {config.MOMENTUM_MIN_LIQUIDITY_CONTRACTS} contracts), skipping")
+                    print(f"[momentum diag] {cand_ticker}: signal fired but liquidity too thin "
+                          f"({available:.0f} < {config.MOMENTUM_MIN_LIQUIDITY_CONTRACTS} contracts), trying next candidate")
+                    continue
+
+                now = int(time.time())
+                start_ts = now - MOMENTUM_CANDLE_LOOKBACK_MINUTES * 60
+                try:
+                    candles = kmd.get_candlesticks(series, cand_ticker, start_ts, now, period_interval=1)
+                except Exception as e:
+                    print(f"[warn] candlesticks failed for {cand_ticker}: {e}")
                     continue
 
                 current_price = candles[-1]["price_cents"] if candles else 50.0
@@ -434,14 +471,25 @@ def momentum_loop(broker):
                 size = risk.position_size_dollars(
                     broker.balance, win_prob,
                     config.MOMENTUM_TAKE_PROFIT_CENTS, config.MOMENTUM_STOP_LOSS_CENTS,
-                    side_price_cents=side_price, market_title=m.get("title", ticker),
+                    side_price_cents=side_price, market_title=candidate.get("title", cand_ticker),
                 )
-                size = _apply_depth_cap(ticker, sig.direction, side_price, size)
-                if size > 0:
-                    opened = broker.try_open_position(ticker, event_ticker, sig.direction, current_price, size,
-                                                       sig.reason, strategy="momentum", market_title=m.get("title", ticker))
-                    if opened:
-                        already_signaled_events.add(ticker)
+                size = _apply_depth_cap(cand_ticker, sig.direction, side_price, size)
+                if size <= 0:
+                    continue
+
+                opened = broker.try_open_position(cand_ticker, cand_event, sig.direction, current_price, size,
+                                                   sig.reason, strategy="momentum", market_title=candidate.get("title", cand_ticker))
+                if opened:
+                    already_signaled_events.add(cand_ticker)
+                    opened_position = opened
+                    break  # successfully opened -- stop trying further candidates this cycle
+
+            if sig and opened_position is None and not attempted_any:
+                # every candidate was blocked by the cheap local pre-filter before
+                # even being attempted -- explicit diagnostic instead of the silent
+                # skip that hid this for hours on Sep 21
+                print(f"[momentum diag] {series}: signal fired but all {len(candidates)} "
+                      f"candidate strikes already held or cooling down, skipping this cycle")
 
         open_count = broker.get_open_position_count()
         print(f"[momentum cycle done] balance=${broker.balance:.2f} open_positions={open_count}")
