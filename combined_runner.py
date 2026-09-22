@@ -338,6 +338,10 @@ def tennis_loop(broker):
                         pullback_str = f", pullback={diag['pullback_cents']:.1f}c" if "pullback_cents" in diag else ""
                         print(f"[reversion diag] {ticker}: spike={diag['spike_direction']} "
                               f"magnitude={diag['spike_magnitude_cents']:.1f}c{pullback_str} reason={diag['reason']}")
+                    elif "largest_move_cents" in diag:
+                        print(f"[reversion diag] {ticker}: trades={diag.get('trade_count', 0)} "
+                              f"largest_move={diag['largest_move_cents']:.1f}c "
+                              f"(need {config.REVERSION_SPIKE_THRESHOLD_CENTS}c) reason={diag['reason']}")
                     else:
                         print(f"[reversion diag] {ticker}: trades={diag.get('trade_count', 0)} reason={diag['reason']}")
                 if sig:

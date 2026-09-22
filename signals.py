@@ -164,6 +164,13 @@ def detect_reversion_signal(trades: List[dict], current_ts: int):
     spike_found_no_pullback means spikes are happening but not correcting --
     potential evidence the mean-reversion premise itself doesn't hold for
     tennis (moves might be continuing as real momentum, not overreacting).
+
+    On a no_spike_found miss, diagnostics also includes largest_move_cents --
+    the biggest move actually observed, even though it didn't clear
+    REVERSION_SPIKE_THRESHOLD_CENTS. Added Sep 21 so a miss shows HOW CLOSE
+    it got, not just that it missed -- "no_spike_found" alone couldn't
+    distinguish a market that came within 1c of the threshold from one that
+    barely moved at all.
     """
     diagnostics = {"trade_count": len(trades)}
     if len(trades) < 2:
@@ -179,6 +186,10 @@ def detect_reversion_signal(trades: List[dict], current_ts: int):
 
     # Find the largest spike: scan for (low, high) pairs within the spike window
     best_spike = None  # (start_price, peak_price, peak_ts, direction)
+    largest_move_seen = 0.0  # tracks the biggest move observed regardless of
+                              # whether it cleared the threshold -- lets a
+                              # no_spike_found miss report HOW CLOSE it got,
+                              # not just that it missed
     for i, t in enumerate(relevant):
         window_end_ts = t["ts"] + config.REVERSION_SPIKE_WINDOW_SECONDS
         window = [x for x in relevant[i:] if x["ts"] <= window_end_ts]
@@ -187,6 +198,7 @@ def detect_reversion_signal(trades: List[dict], current_ts: int):
         prices = [x["yes_price_cents"] for x in window]
         move_up = max(prices) - t["yes_price_cents"]
         move_down = t["yes_price_cents"] - min(prices)
+        largest_move_seen = max(largest_move_seen, move_up, move_down)
         if move_up >= config.REVERSION_SPIKE_THRESHOLD_CENTS:
             peak_idx = prices.index(max(prices))
             candidate = (t["yes_price_cents"], max(prices), window[peak_idx]["ts"], "up")
@@ -200,6 +212,7 @@ def detect_reversion_signal(trades: List[dict], current_ts: int):
 
     if best_spike is None:
         diagnostics["spike_found"] = False
+        diagnostics["largest_move_cents"] = largest_move_seen
         diagnostics["reason"] = "no_spike_found"
         return None, diagnostics
 
