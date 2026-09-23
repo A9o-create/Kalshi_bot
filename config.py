@@ -75,16 +75,16 @@ MOMENTUM_MAX_SPREAD_CENTS = 4            # don't chase if spread wider than this
 MOMENTUM_TRAILING_WINDOW_MINUTES = 6
 MOMENTUM_CURRENT_WINDOW_MINUTES = 2
 
-# Real session data (Sep 16, 5 full KXBTC15M windows observed continuously)
-# showed the original Kalshi-volume-spike trigger structurally never fires
-# on this market: trailing volume was zero in EVERY check, every window, no
-# exceptions -- the market just doesn't have baseline liquidity for a spike
-# to stand out from. Since the contract resolves against an external index
-# (CF Benchmarks BRTI) anyway, the trigger now fires directly off Coinbase's
-# real BTC price movement instead of requiring Kalshi-side volume at all.
-# Threshold is a first guess (0.15% over the current-window lookback), not
-# yet calibrated against real fire rate -- watch and adjust.
-MOMENTUM_BTC_TREND_THRESHOLD_PCT = 0.0015
+# Original 0.15% was a first guess, uncalibrated. Real session data
+# (Sep 23) showed it was too conservative: 0.15% was never cleared once in
+# hours of continuous observation, yet real moves regularly reached
+# 0.10-0.14% (-0.140%, -0.109%, +0.125%, -0.102%, among others) without
+# ever quite triggering. Lowered to 0.08% -- a moderate reduction (within
+# the 0.05-0.08% range discussed as reasonable), landing on the more
+# conservative end given this threshold is shared across BOTH KXBTCD and
+# KXBTC15M, so any reduction effectively doubles the trade-attempt surface,
+# not just one series' worth.
+MOMENTUM_BTC_TREND_THRESHOLD_PCT = 0.0008
 
 # Decoupled from MOMENTUM_CURRENT_WINDOW_MINUTES (a Kalshi-candle concept
 # that's now largely unused for this leg's trigger) so it can be tuned
