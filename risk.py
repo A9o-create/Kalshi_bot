@@ -203,3 +203,23 @@ def check_favorite_entry_exit(direction: str, entry_yes_price_cents: float, curr
     if pct_change <= -config.FAVORITE_ENTRY_STOP_LOSS_PCT:
         return "stop_loss"
     return None
+
+
+def check_trailing_stop_loss(peak_side_price_cents: float, current_side_price_cents: float) -> Optional[str]:
+    """
+    For favorite_entry_thin / favorite_entry_majority: no take-profit
+    component at all by design -- those strategies ride to settlement for
+    upside instead of selling early. This is the only exit besides actual
+    settlement, protecting against the downside a genuinely uncapped hold
+    would otherwise have. Anchored to the peak (best) side price observed
+    since entry, not a fixed distance from entry -- so a position that
+    spiked well past its entry price and then reverses still gets
+    protected relative to that real high point, not given back to zero.
+
+    Worked example this was built against: entry at 63c, price runs up to
+    a 95c peak, then reverses -- triggers once price drops to
+    95 - FAVORITE_ENTRY_TRAILING_STOP_CENTS, not 63 minus that amount.
+    """
+    if current_side_price_cents <= peak_side_price_cents - config.FAVORITE_ENTRY_TRAILING_STOP_CENTS:
+        return "stop_loss"
+    return None

@@ -56,6 +56,14 @@ class Position:
     requested_contracts: int = 0             # live mode only: what we asked for
     filled_contracts: int = 0                # live mode only: what actually filled
     status: str = "open"                     # live mode only: "pending_fill" | "open" | "closing"
+    # High-water mark for the SIDE actually held (not raw yes-price -- so
+    # "higher is always more favorable" regardless of direction). Used by
+    # favorite_entry_thin / favorite_entry_majority's trailing stop-loss:
+    # those strategies ride to settlement for upside (no take-profit) but
+    # need real downside protection, anchored to the best price seen since
+    # entry rather than a fixed distance from entry. None until the first
+    # exit-check updates it (initialized to entry price at that point).
+    peak_side_price_cents: Optional[float] = None
 
 
 class PaperBroker:

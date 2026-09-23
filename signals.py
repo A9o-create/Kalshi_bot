@@ -329,33 +329,88 @@ def detect_value_entry_signal(trades: List[dict], market_age_seconds: float, mar
         return Signal(direction="no", reason=f"early value entry: no cheap at {no_price:.0f}c")
 
 
-def detect_favorite_entry_signal(trades: List[dict], market_age_seconds: float) -> Optional[Signal]:
+def _is_watchlist_vs_watchlist(market_title: Optional[str]) -> bool:
+    """
+    True if TWO OR MORE distinct watchlist players appear in the title --
+    both sides of the match are watchlisted, not just one. Deliberately
+    simpler than _watchlist_player_direction()'s subject/opponent parsing:
+    this only needs to know "both players are watchlisted," not which one
+    is the subject, so a substring count is sufficient and more robust
+    against title-format variation than parsing the "A vs B" structure.
+
+    Used to exclude these matches from the thin-market hold-to-settlement
+    trigger in detect_favorite_entry_signal() -- watchlist players are
+    watchlisted specifically because of their real volatility potential,
+    so a thin/quiet market involving two of them is a poor fit for "this
+    match probably won't move," unlike a genuinely obscure, low-profile match.
+    """
+    if not market_title or not config.WATCHLIST_PLAYERS:
+        return False
+    title_lower = market_title.lower()
+    matches = sum(1 for name in config.WATCHLIST_PLAYERS if name.lower() in title_lower)
+    return matches >= 2
+
+
+def detect_favorite_entry_signal(trades: List[dict], market_age_seconds: float, market_title: Optional[str] = None):
     """
     Leg 4: buy the FAVORITE (whichever side has the higher implied win
-    probability), but only within a very tight window of the market's
-    first observed trade -- a proxy for "the moment Kalshi moved this
-    match to active," since Kalshi doesn't expose a direct activation
-    event. Deliberately much tighter than value_entry's 15-minute window
-    (FAVORITE_ENTRY_MAX_MARKET_AGE_SECONDS, seconds not minutes) since the
-    whole point is catching the market's initial read before the match's
-    own action has a chance to move the price.
+    probability). Three independent trigger paths:
+
+    "age" (original, unchanged): within FAVORITE_ENTRY_MAX_MARKET_AGE_SECONDS
+    of the market's first observed trade -- a proxy for "the moment Kalshi
+    moved this match to active," since Kalshi doesn't expose a direct
+    activation event.
+
+    "thin_market" (added Sep 22): fewer than FAVORITE_ENTRY_MIN_TRADES_THRESHOLD
+    trades, regardless of age -- catches markets that drift PAST the age
+    window without ever building real trade history. EXCLUDES
+    watchlist-vs-watchlist matches (see _is_watchlist_vs_watchlist) -- those
+    are watchlisted specifically for their volatility potential, a poor fit
+    for a trigger meant for genuinely quiet markets.
+
+    "majority" (added Sep 22): everything neither path above catches -- a
+    mature market (real trade history, past the age window), OR a
+    watchlist-vs-watchlist match excluded from thin_market. Buys the
+    majority side on the same logic as the other two: the market's own
+    pricing already reflects whatever's happened so far. Real consequence:
+    this makes favorite_entry fire on nearly every market it examines,
+    since age OR thin_market OR majority covers almost the whole space --
+    value_entry, checked after favorite_entry in the per-ticker priority
+    order, will rarely get a chance to fire anymore.
 
     Opposite thesis from value_entry: instead of betting on early
     mispricing favoring the underdog, bets the market's initial pricing
     (often informed by seeding/ranking/recent form) is worth taking
-    immediately. Exit is percentage-based, same pattern as value_entry.
+    immediately.
+
+    Returns (Signal | None, trigger_type: str | None) -- "age",
+    "thin_market", or "majority". The caller uses trigger_type to decide
+    exit behavior: "age" keeps the original percentage-based TP/SL;
+    "thin_market" and "majority" both ride to settlement for upside (no
+    take-profit) and rely on a trailing stop-loss for downside protection
+    instead -- a market thin or unclaimed at entry doesn't have to stay
+    that way, so an uncapped hold would have real downside risk.
     """
     if not trades:
-        return None
-    if market_age_seconds > config.FAVORITE_ENTRY_MAX_MARKET_AGE_SECONDS:
-        return None
+        return None, None
+
+    is_fresh_by_age = market_age_seconds <= config.FAVORITE_ENTRY_MAX_MARKET_AGE_SECONDS
+    is_thin_by_trades = len(trades) < config.FAVORITE_ENTRY_MIN_TRADES_THRESHOLD
+
+    if is_fresh_by_age:
+        trigger_type = "age"
+    elif is_thin_by_trades and not _is_watchlist_vs_watchlist(market_title):
+        trigger_type = "thin_market"
+    else:
+        trigger_type = "majority"
 
     yes_price = trades[-1]["yes_price_cents"]
     if yes_price <= 0 or yes_price >= 100:
-        return None  # degenerate price, nothing to trade
+        return None, None  # degenerate price, nothing to trade
 
     if yes_price >= 50:
-        return Signal(direction="yes", reason=f"match just active: yes favored at {yes_price:.0f}c")
+        sig = Signal(direction="yes", reason=f"{trigger_type}: yes favored at {yes_price:.0f}c")
     else:
         no_price = 100 - yes_price
-        return Signal(direction="no", reason=f"match just active: no favored at {no_price:.0f}c")
+        sig = Signal(direction="no", reason=f"{trigger_type}: no favored at {no_price:.0f}c")
+    return sig, trigger_type

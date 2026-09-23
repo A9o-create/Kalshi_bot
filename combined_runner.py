@@ -243,7 +243,7 @@ def tennis_loop(broker):
     while _running:
         halted = False
         for pos in broker.get_open_positions_snapshot():
-            if pos.strategy not in ("reversion", "value_entry", "favorite_entry"):
+            if pos.strategy not in ("reversion", "value_entry", "favorite_entry", "favorite_entry_thin", "favorite_entry_majority"):
                 continue  # not this loop's position -- momentum_loop owns it
             try:
                 if pos.strategy == "reversion":
@@ -261,12 +261,28 @@ def tennis_loop(broker):
                         continue
                     current_price = trades[-1]["yes_price_cents"]
                     exit_reason = risk.check_value_entry_exit(pos.direction, pos.entry_price_cents, current_price)
-                else:  # favorite_entry
+                elif pos.strategy == "favorite_entry":
                     trades = kmd.get_recent_trades(pos.ticker, limit=5)
                     if not trades:
                         continue
                     current_price = trades[-1]["yes_price_cents"]
                     exit_reason = risk.check_favorite_entry_exit(pos.direction, pos.entry_price_cents, current_price)
+                else:  # favorite_entry_thin / favorite_entry_majority -- ride to
+                    # settlement for upside (no take-profit at all), protected on
+                    # the downside by a trailing stop anchored to the best price
+                    # seen since entry, not a fixed distance from entry. A market
+                    # thin or unclaimed at entry doesn't have to stay that way, so
+                    # an uncapped hold would have real, unprotected downside risk.
+                    trades = kmd.get_recent_trades(pos.ticker, limit=5)
+                    if not trades:
+                        continue
+                    current_price = trades[-1]["yes_price_cents"]
+                    side_price = current_price if pos.direction == "yes" else (100 - current_price)
+                    if pos.peak_side_price_cents is None:
+                        pos.peak_side_price_cents = side_price  # first check after open -- initialize the high-water mark
+                    else:
+                        pos.peak_side_price_cents = max(pos.peak_side_price_cents, side_price)
+                    exit_reason = risk.check_trailing_stop_loss(pos.peak_side_price_cents, side_price)
 
                 is_settled, resolved_price = _check_market_settled(pos.ticker)
                 if is_settled:
@@ -363,7 +379,7 @@ def tennis_loop(broker):
 
                 age = _market_age_seconds(trades)
 
-                sig = signals.detect_favorite_entry_signal(trades, age)
+                sig, trigger_type = signals.detect_favorite_entry_signal(trades, age, market_title=m.get("title"))
                 if sig:
                     current_price = trades[-1]["yes_price_cents"]
                     side_price = current_price if sig.direction == "yes" else (100 - current_price)
@@ -374,8 +390,21 @@ def tennis_loop(broker):
                                                        side_price_cents=side_price, market_title=m.get("title", ticker))
                     size = _apply_depth_cap(ticker, sig.direction, side_price, size)
                     if size > 0:
+                        # thin_market positions hold to settlement instead of
+                        # normal TP/SL -- tagged with a distinct strategy name
+                        # so the exit-check dispatch treats them differently
+                        # both thin_market and majority ride to settlement with
+                        # trailing-stop protection instead of normal TP/SL --
+                        # kept as distinct strategy names for diagnostic
+                        # tracking of which trigger actually fired
+                        if trigger_type == "thin_market":
+                            strategy_name = "favorite_entry_thin"
+                        elif trigger_type == "majority":
+                            strategy_name = "favorite_entry_majority"
+                        else:
+                            strategy_name = "favorite_entry"
                         opened = broker.try_open_position(ticker, event_ticker, sig.direction, current_price, size,
-                                                           sig.reason, strategy="favorite_entry", market_title=m.get("title", ticker))
+                                                           sig.reason, strategy=strategy_name, market_title=m.get("title", ticker))
                         if opened:
                             already_signaled_events.add(ticker)
                     continue

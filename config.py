@@ -131,9 +131,40 @@ VALUE_ENTRY_STOP_LOSS_PCT = 0.15         # left as-is: the risk side of the rati
 # Kalshi doesn't expose a direct activation event; this is the earliest
 # reliably detectable point via trade history alone.
 FAVORITE_ENTRY_MAX_MARKET_AGE_SECONDS = 120
+# Second trigger path, added Sep 22: catches markets that drift PAST the
+# age window above without ever building real trade history -- real
+# production data showed multiple tickers stuck at exactly 1 trade for
+# hours, invisible to the age-only trigger. Excludes watchlist-vs-watchlist
+# matches (_is_watchlist_vs_watchlist) -- kept exclusively on the age
+# trigger, since those matches carry real volatility potential.
+FAVORITE_ENTRY_MIN_TRADES_THRESHOLD = 10
+# Third trigger path, also added Sep 22: covers everything neither of the
+# above catches -- a mature market (real trade history, past the age
+# window) with no other leg's signal firing on it, OR a watchlist-vs-
+# watchlist match excluded from the thin_market path above. Buys the
+# majority side regardless, on the same logic as the other two paths: the
+# market's own pricing already reflects whatever's happened so far.
+# Real consequence worth knowing: this makes favorite_entry fire on nearly
+# every market it examines (age OR thin_market OR majority covers almost
+# the whole space), which means value_entry -- checked after favorite_entry
+# in the per-ticker priority order -- will rarely get a chance to fire
+# anymore.
+#
+# Both favorite_entry_thin (from the trigger above) and favorite_entry_majority
+# (from this one) share the same exit design: no take-profit at all --
+# they ride to settlement for upside -- protected on the downside by
+# FAVORITE_ENTRY_TRAILING_STOP_CENTS below instead of a fixed percentage
+# TP/SL. Anchored to the PEAK price seen since entry, not entry price
+# itself -- a position that ran up well past entry and then reversed is
+# protected relative to that real high point. Worked example this number
+# came from: entry at 63c, price peaks at 95c, stop triggers on a 10c dip
+# FROM THE PEAK (85c), not a 10c dip from the original 63c entry.
+FAVORITE_ENTRY_TRAILING_STOP_CENTS = 10
 # Starting from the same percentage framework as value_entry (already
 # fee-floor calibrated) rather than untested numbers -- easy to tune
-# independently later since this is its own dedicated config.
+# independently later since this is its own dedicated config. Only used by
+# the ORIGINAL "age" trigger path now -- thin_market/majority use the
+# trailing stop above instead.
 FAVORITE_ENTRY_TAKE_PROFIT_MIN_PCT = 0.25
 FAVORITE_ENTRY_TAKE_PROFIT_MAX_PCT = 0.375
 FAVORITE_ENTRY_STOP_LOSS_PCT = 0.15

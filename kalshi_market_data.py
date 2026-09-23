@@ -12,10 +12,21 @@ Requires: pip install requests
 
 import time
 import random
+import threading
 import requests
 import config
 
 _last_request_ts = 0.0
+# Needed because tennis_loop and momentum_loop now run as separate threads
+# sharing this module (post-merge) -- _last_request_ts is a plain global,
+# and without a lock, two threads can each read the same stale timestamp,
+# each independently conclude "enough time has passed," and both fire
+# requests nearly simultaneously. Proved directly: two threads hammering
+# _get() concurrently produced a 0.1ms minimum gap against a 200ms
+# requirement, with roughly half of all gaps violating the spacing. This
+# wasn't a bug before the merge -- tennis and momentum lived in separate
+# processes, each with its own independent copy of this variable.
+_request_lock = threading.Lock()
 
 
 def _get(url: str, params: dict = None, timeout: int = 10) -> requests.Response:
@@ -26,17 +37,25 @@ def _get(url: str, params: dict = None, timeout: int = 10) -> requests.Response:
     Retry-After header if Kalshi sends one) instead of failing on the first
     throttle. Still raises (and lets the caller's existing try/except handle
     it) if retries are exhausted or a non-429 error occurs.
+
+    The entire check-sleep-request-update sequence holds _request_lock, so
+    pacing is enforced across BOTH loop threads' combined request stream,
+    not just within one thread's own sequential calls -- the lock is held
+    through the actual request too (not released after just the sleep),
+    since releasing early would let a second thread's check-and-sleep race
+    against this request the same way the original bug did.
     """
     global _last_request_ts
 
     for attempt in range(config.KALSHI_MAX_429_RETRIES + 1):
-        elapsed = time.time() - _last_request_ts
-        wait = config.KALSHI_MIN_REQUEST_INTERVAL_SECONDS - elapsed
-        if wait > 0:
-            time.sleep(wait)
+        with _request_lock:
+            elapsed = time.time() - _last_request_ts
+            wait = config.KALSHI_MIN_REQUEST_INTERVAL_SECONDS - elapsed
+            if wait > 0:
+                time.sleep(wait)
 
-        resp = requests.get(url, params=params, timeout=timeout)
-        _last_request_ts = time.time()
+            resp = requests.get(url, params=params, timeout=timeout)
+            _last_request_ts = time.time()
 
         if resp.status_code == 429:
             if attempt == config.KALSHI_MAX_429_RETRIES:
