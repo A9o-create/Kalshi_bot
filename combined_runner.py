@@ -112,6 +112,24 @@ def _momentum_event_key(ticker: str) -> str:
     return ticker
 
 
+def _count_open_positions_in_window(broker, window_key: str) -> int:
+    """
+    Counts currently open momentum positions sharing the same underlying
+    window (e.g. all KXBTCD-26SEP2217-T* strikes share window
+    'KXBTCD-26SEP2217'), regardless of which specific strike is held.
+    Reuses _derive_match_key()'s string transformation for a DIFFERENT
+    purpose than its original tennis-pairing use -- here it's purely a
+    correlated-exposure counter, not an event-dedup key (that's
+    _momentum_event_key() above, deliberately NOT window-collapsed, since
+    holding several different strikes at once is allowed -- just capped).
+    """
+    count = 0
+    for pos in broker.get_open_positions_snapshot():
+        if pos.strategy == "momentum" and _derive_match_key(pos.ticker) == window_key:
+            count += 1
+    return count
+
+
 def _apply_depth_cap(ticker: str, direction: str, side_price: float, size: float) -> float:
     """
     Fetches the orderbook and caps `size` to MAX_BOOK_DEPTH_FRACTION of the
@@ -548,6 +566,14 @@ def momentum_loop(broker):
                 if cand_event in cooldown_until and time.time() < cooldown_until[cand_event]:
                     continue
                 attempted_any = True
+
+                window_key = _derive_match_key(cand_ticker)
+                in_window_count = _count_open_positions_in_window(broker, window_key)
+                if in_window_count >= config.MOMENTUM_MAX_POSITIONS_PER_WINDOW:
+                    print(f"[momentum diag] {cand_ticker}: window {window_key} already has "
+                          f"{in_window_count} position(s) (max {config.MOMENTUM_MAX_POSITIONS_PER_WINDOW}), "
+                          f"trying next candidate")
+                    continue
 
                 try:
                     ob = kmd.get_orderbook(cand_ticker)

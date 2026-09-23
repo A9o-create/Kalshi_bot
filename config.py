@@ -97,6 +97,20 @@ MOMENTUM_BTC_LOOKBACK_MINUTES = 2
 # paper mode, which isn't realistic -- this skips the trade instead if
 # fewer than this many contracts are resting at the relevant price level.
 MOMENTUM_MIN_LIQUIDITY_CONTRACTS = 5
+# Caps how many strikes of the SAME underlying window (e.g. all
+# KXBTCD-26SEP2217-T* strikes share one window) can be held simultaneously.
+# Multiple strikes of one window are NOT diversified risk -- they're the
+# same directional bet at different thresholds, and a decisive move can
+# make them all lose together. Real production data (Sep 22): the
+# multi-strike fallback logic (built to keep this leg "consistently
+# active" when the nearest strike is already held) let 4 simultaneous NO
+# strikes accumulate on one KXBTCD window; when BTC moved decisively up,
+# all 4 settled against the bot within 8 seconds of each other, triggering
+# the peak-drawdown circuit breaker. This cap limits how much correlated
+# exposure the fallback can build on one window while still allowing SOME
+# fallback activity (unlike reverting to a hard 1-position-per-window
+# limit, which would undo the "stay active" benefit entirely).
+MOMENTUM_MAX_POSITIONS_PER_WINDOW = 2
 # Kalshi's taker fee peaks at ~1.75c/contract at a 50c price and is charged
 # on BOTH open and close -- worst case ~3.5c/contract round trip. Thresholds
 # below were widened from the original 8c/4c so a win still clears the fee
