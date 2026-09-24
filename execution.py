@@ -532,6 +532,55 @@ class KalshiLiveBroker:
 
     # --- trading ---
 
+    def try_open_position(self, ticker: str, event_ticker: str, direction: str, price_cents: float, size_dollars: float,
+                           reason: str, strategy: str = "", market_title: str = "") -> Optional[Position]:
+        """
+        Atomically checks risk.can_open_new_position() and reserves the
+        position placeholder under the SAME lock -- mirrors PaperBroker's
+        method of the same name, so two threads sharing one broker can't
+        both pass the concurrency-cap check before either one's position is
+        actually recorded. Added Sep 24 after the live shakedown's first
+        real signal fire crashed with AttributeError -- this method existed
+        on PaperBroker (added during the tennis+momentum merge) but was
+        never backported here, since every test since then ran against
+        PaperBroker only.
+
+        The orderbook fetch (for maker pricing) happens BEFORE the lock is
+        acquired, same as open_position -- it's read-only market data with
+        no bearing on whether a slot is available, so only the actual
+        reservation needs to be atomic with the cap check, not the network
+        call.
+        """
+        requested_contracts = max(1, int(size_dollars / (price_cents / 100.0)))
+        taker_price = min(99, max(1, int(price_cents) + (2 if direction == "yes" else -2)))
+
+        try:
+            ob = kalshi_market_data.get_orderbook(ticker)
+            maker_price = ob["best_yes_bid_cents"] if direction == "yes" else ob["best_no_bid_cents"]
+            if maker_price <= 0:
+                maker_price = taker_price
+        except Exception as e:
+            print(f"[warn] orderbook fetch failed for {ticker}, skipping maker attempt: {e}")
+            maker_price = taker_price
+
+        pos = Position(
+            ticker=ticker, event_ticker=event_ticker, direction=direction,
+            entry_price_cents=price_cents, size_dollars=0.0,
+            opened_ts=time.time(), reason=reason, strategy=strategy, market_title=market_title,
+            requested_contracts=requested_contracts, filled_contracts=0,
+            status="pending_fill",
+        )
+        with self._lock:
+            open_count = len(self.open_positions)
+            open_events = {p.event_ticker for p in self.open_positions.values()}
+            allowed, _reason = risk.can_open_new_position(open_count, open_events, event_ticker)
+            if not allowed:
+                return None
+            self.open_positions[ticker] = pos
+
+        self._executor.submit(self._resolve_open_fill, ticker, pos, direction, requested_contracts, maker_price, taker_price)
+        return pos
+
     def open_position(self, ticker: str, event_ticker: str, direction: str, price_cents: float, size_dollars: float, reason: str, strategy: str = "", market_title: str = "") -> Optional[Position]:
         """
         Fetches the current best bid (fast, single GET) to price a maker
