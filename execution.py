@@ -276,6 +276,9 @@ class KalshiLiveBroker:
         self.base_url = config.KALSHI_API_BASE_URL
         self.open_positions: dict[str, Position] = {}
         self.daily_pnl = 0.0
+        self.peak_daily_pnl = 0.0  # mirrors PaperBroker -- high-water mark for
+                                    # _should_halt()'s peak-drawdown check, shared
+                                    # by both loops regardless of broker type
         self.starting_balance = self.get_balance()
         self.balance = self.starting_balance
         self._sync_positions_from_kalshi()
@@ -648,6 +651,7 @@ class KalshiLiveBroker:
 
         with self._lock:
             self.daily_pnl += pnl_dollars
+            self.peak_daily_pnl = max(self.peak_daily_pnl, self.daily_pnl)
             if closed_contracts < contracts_to_sell:
                 remaining = contracts_to_sell - closed_contracts
                 print(f"[LIVE] partial close: {closed_contracts}/{contracts_to_sell} closed, "
