@@ -201,22 +201,25 @@ DAILY_LOSS_CAP_PCT = 0.18                # was 0.10 -- halts on NET cumulative l
                                           # not a trailing peak, so a large intraday give-back can still
                                           # avoid triggering this if net loss stays under 18%
 # Absolute last-resort floor, checked against LIVE balance directly (not a
-# fixed starting-balance percentage). $50 rather than literally $0 --
-# leaves a small buffer so one more in-flight fill can't push balance
-# negative before the check catches it.
-MIN_BALANCE_DOLLARS = 50.0
+# fixed starting-balance percentage). Sized for the real live_prod account
+# ($150 starting balance) -- $25 sits below BOTH percentage triggers at that
+# size (18% daily loss cap fires around a $27 loss; 12% peak-drawdown fires
+# around an $18 pullback), so this only ever binds if something goes wrong
+# badly enough that neither percentage check caught it first -- a genuine
+# last resort, not a redundant duplicate of the other two.
+MIN_BALANCE_DOLLARS = 25.0
 # Halts if the session gives back this much (as a % of starting balance)
 # from its own intraday peak, even if net loss from the start hasn't hit
 # DAILY_LOSS_CAP_PCT yet -- catches a large peak-to-trough swing that a
 # purely net-based check would miss. First guess, not yet calibrated
 # against real data -- watch and adjust, same as every other threshold.
 PEAK_DRAWDOWN_CAP_PCT = 0.12
-MAX_CONCURRENT_POSITIONS = 20  # was 10 -- momentum now scans TWO series (KXBTCD + KXBTC15M) sharing
-                                # one ledger with tennis, and was observed hitting the old cap (10/10)
-                                # in production, blocking both legs from opening anything new regardless
-                                # of signal quality. Up to 60% of balance deployed at once now (was 30%)
-                                # if every slot happened to fill at the 3% max simultaneously -- a real
-                                # ceiling, though actual sizes observed so far are mostly well under that.
+MAX_CONCURRENT_POSITIONS = 3   # TEMPORARILY reduced from 20 for the live_prod shakedown --
+                                # KalshiLiveBroker and the position re-sync have never touched
+                                # Kalshi's real servers. Keeping real-money complexity low while
+                                # that gets its first real-world validation. Raise back once the
+                                # shakedown proves clean -- was 20 in paper_prod, see git history
+                                # for that reasoning (momentum scanning two series, etc.)
 MAX_POSITIONS_PER_EVENT = 1
 
 # --- Kalshi request pacing / 429 handling ---
