@@ -346,7 +346,20 @@ class KalshiLiveBroker:
         url = domain_only + path
         headers = self._headers(method, path)  # signs the FULL path, unchanged -- see docstring
         resp = requests.request(method, url, headers=headers, params=params, json=json_body, timeout=10)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            # Kalshi's actual error message (field, code, reason) lives in the
+            # response body, which raise_for_status()'s default exception text
+            # never includes -- without this, a 400 just says "Bad Request"
+            # with no way to know WHICH field failed validation. Added Sep 24
+            # while diagnosing the first real 400 from the new V2 order
+            # endpoint, which gave zero detail without this.
+            try:
+                detail = resp.json()
+            except Exception:
+                detail = resp.text
+            raise requests.exceptions.HTTPError(f"{e} -- response body: {detail}", response=resp) from None
         return resp.json()
 
     # --- account ---
