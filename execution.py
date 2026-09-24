@@ -278,6 +278,7 @@ class KalshiLiveBroker:
         self.daily_pnl = 0.0
         self.starting_balance = self.get_balance()
         self.balance = self.starting_balance
+        self._sync_positions_from_kalshi()
 
         # Fill-waiting used to block the caller for up to ORDER_FILL_TIMEOUT_SECONDS
         # per order, which meant only one position could be opened/closed at a
@@ -329,6 +330,103 @@ class KalshiLiveBroker:
         data = self._request("GET", "/trade-api/v2/portfolio/balance")
         # balance is returned in cents per Kalshi's convention
         return data.get("balance", 0) / 100.0
+
+    def _sync_positions_from_kalshi(self):
+        """
+        Queries Kalshi's real portfolio on startup and reconstructs
+        self.open_positions from whatever's ACTUALLY open on the real
+        account -- instead of assuming a blank slate. Without this, a
+        redeploy while real positions are open would make the bot
+        completely blind to them: no exit-check would ever run on them
+        again, and position-count-based risk limits (MAX_CONCURRENT_POSITIONS,
+        the per-window cap) would be computed against an empty set that
+        doesn't reflect real exposure.
+
+        Real, honest limitations -- Kalshi's GET /portfolio/positions
+        response (verified against docs.kalshi.com's documented schema,
+        NOT against a real populated response) has no concept of "which of
+        our bot's strategies opened this position" -- that's purely
+        bot-internal metadata Kalshi has no way to know:
+
+        - direction is INFERRED from the sign of the `position` field
+          (positive assumed = net long YES, negative = net long NO) --
+          the standard convention, but not something this codebase has
+          confirmed against a real, populated response yet.
+        - entry_price_cents is APPROXIMATED as total_traded_dollars /
+          total_traded -- the average cost across ALL historical fills on
+          this ticker, not necessarily one clean "entry price" if there
+          were multiple partial fills or round trips on the same ticker.
+        - strategy is inferred from series prefix: CRYPTO_SERIES tickers
+          get "momentum" (safe -- momentum_loop only ever trades those
+          series). Anything else gets "resynced_unknown", a new
+          pseudo-strategy with its own generic, conservative exit rule
+          (see combined_runner.py / risk.py) -- we genuinely cannot know
+          which of the tennis-specific strategies really opened it, so
+          re-syncing gives it SOME managed exit rather than leaving a
+          real position completely unmanaged after a restart.
+
+        This method itself has NOT been tested against Kalshi's real, live
+        API -- only against the documented response schema. Treat the
+        first live restart with real positions open as a genuine test of
+        this path, not a guarantee it behaves correctly.
+        """
+        positions_synced = []
+        cursor = None
+        while True:
+            params = {"limit": 1000}
+            if cursor:
+                params["cursor"] = cursor
+            data = self._request("GET", "/trade-api/v2/portfolio/positions", params=params)
+
+            for mp in data.get("market_positions", []):
+                net_contracts = mp.get("position", 0)
+                if net_contracts == 0:
+                    continue  # flat -- nothing actually held on this ticker
+
+                ticker = mp["ticker"]
+                direction = "yes" if net_contracts > 0 else "no"
+                total_traded = mp.get("total_traded", 0)
+                total_traded_dollars = float(mp.get("total_traded_dollars", 0) or 0)
+                entry_price_cents = (total_traded_dollars / total_traded * 100.0) if total_traded > 0 else 50.0
+                size_dollars = abs(float(mp.get("market_exposure_dollars", 0) or 0))
+                filled_contracts = abs(net_contracts)
+
+                series = ticker.split("-")[0]
+                if series in config.CRYPTO_SERIES:
+                    strategy = "momentum"
+                    event_ticker = ticker  # per-strike granularity, matches _momentum_event_key
+                else:
+                    strategy = "resynced_unknown"
+                    event_ticker = ticker.rsplit("-", 1)[0] if "-" in ticker else ticker  # matches _derive_match_key
+
+                pos = Position(
+                    ticker=ticker,
+                    event_ticker=event_ticker,
+                    direction=direction,
+                    entry_price_cents=entry_price_cents,
+                    size_dollars=size_dollars,
+                    opened_ts=time.time(),  # real open time not available from this endpoint -- treated as "now"
+                    reason="resynced from Kalshi on startup",
+                    strategy=strategy,
+                    market_title="",  # not returned by this endpoint
+                    filled_contracts=filled_contracts,
+                    status="open",
+                )
+                self.open_positions[ticker] = pos
+                positions_synced.append(pos)
+
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+
+        if positions_synced:
+            print(f"[LIVE] Re-synced {len(positions_synced)} real open position(s) from Kalshi on startup:")
+            for pos in positions_synced:
+                print(f"  {pos.ticker}: strategy={pos.strategy} direction={pos.direction} "
+                      f"entry~{pos.entry_price_cents:.1f}c size=${pos.size_dollars:.2f} "
+                      f"(strategy/entry_price INFERRED -- verify against the real account)")
+        else:
+            print("[LIVE] No open positions found on Kalshi -- starting with a clean slate.")
 
     # --- order fill polling ---
 

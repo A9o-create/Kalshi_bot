@@ -43,6 +43,15 @@ import coinbase_data
 
 TENNIS_POLL_INTERVAL_SECONDS = 60
 MOMENTUM_POLL_INTERVAL_SECONDS = 60
+# Exit-checks now run on their own, much faster cadence than the full
+# entry-scanning cycle -- see tennis_loop/momentum_loop for why. Real
+# production evidence (Sep 24): a momentum position with a 6c stop-loss
+# exited at a ~99c loss instead, because the only time exits were checked
+# was once per full ~60-90s cycle (which also includes the slow,
+# many-request entry scan) -- BTC moved fast enough within that window to
+# blow straight through the stop before the next check ever happened.
+TENNIS_EXIT_CHECK_INTERVAL_SECONDS = 15
+MOMENTUM_EXIT_CHECK_INTERVAL_SECONDS = 15
 # KXBTCD markets live far longer than KXBTC15M's strict 15-minute window
 # (real examples observed 8 hours apart -- exact cadence not fully
 # confirmed, but clearly hours not minutes). Candles are only used here to
@@ -257,11 +266,12 @@ def tennis_loop(broker):
     """Mean reversion + value entry. Runs in its own thread against the shared broker."""
     already_signaled_events: set[str] = set()
     cooldown_until: dict[str, float] = {}
+    last_entry_scan_ts = 0.0  # entry-scanning is throttled separately from exit-checks -- see below
 
     while _running:
         halted = False
         for pos in broker.get_open_positions_snapshot():
-            if pos.strategy not in ("reversion", "value_entry", "favorite_entry", "favorite_entry_thin", "favorite_entry_majority"):
+            if pos.strategy not in ("reversion", "value_entry", "favorite_entry", "favorite_entry_thin", "favorite_entry_majority", "resynced_unknown"):
                 continue  # not this loop's position -- momentum_loop owns it
             try:
                 if pos.strategy == "reversion":
@@ -279,7 +289,13 @@ def tennis_loop(broker):
                         continue
                     current_price = trades[-1]["yes_price_cents"]
                     exit_reason = risk.check_value_entry_exit(pos.direction, pos.entry_price_cents, current_price)
-                elif pos.strategy == "favorite_entry":
+                elif pos.strategy in ("favorite_entry", "resynced_unknown"):
+                    # resynced_unknown (see execution.py's _sync_positions_from_kalshi):
+                    # a real position found open on Kalshi at startup whose ORIGINAL
+                    # strategy we have no way to know -- Kalshi's API has no concept
+                    # of our internal strategy taxonomy. Reuses favorite_entry's
+                    # exit rule as a safe, generic default rather than leaving a
+                    # real position completely unmanaged after a restart.
                     trades = kmd.get_recent_trades(pos.ticker, limit=5)
                     if not trades:
                         continue
@@ -343,7 +359,35 @@ def tennis_loop(broker):
             print(f"[HALT] tennis_loop stopping: {halt_reason}")
             break
 
-        for series in config.TENNIS_SERIES:
+        # Entry-scanning (the slow, many-request pass below) is throttled to
+        # roughly TENNIS_POLL_INTERVAL_SECONDS, independent of how often the
+        # exit-check loop above actually runs (TENNIS_EXIT_CHECK_INTERVAL_SECONDS,
+        # much faster). This is the fix for the gap-through issue: exits now
+        # get checked far more often than new entries get scanned for.
+        now = time.time()
+        if now - last_entry_scan_ts >= TENNIS_POLL_INTERVAL_SECONDS:
+            last_entry_scan_ts = now
+            _tennis_entry_scan(broker, already_signaled_events, cooldown_until)
+
+        open_count = broker.get_open_position_count()
+        print(f"[tennis cycle done] balance=${broker.balance:.2f} open_positions={open_count}")
+        latest_status["balance"] = round(broker.balance, 2)
+        latest_status["open_positions"] = open_count
+        latest_status["last_cycle_ts"] = time.time()
+        latest_status["environment"] = config.ENVIRONMENT
+        latest_status["tennis"]["last_cycle_ts"] = time.time()
+        time.sleep(TENNIS_EXIT_CHECK_INTERVAL_SECONDS)
+
+
+def _tennis_entry_scan(broker, already_signaled_events, cooldown_until):
+    """
+    The actual entry-scanning pass: fetches markets per series, checks
+    reversion / favorite_entry / value_entry in priority order. Extracted
+    into its own function so tennis_loop can throttle how often this
+    (relatively slow, many-request) pass runs, independently of how often
+    exit-checks run -- see tennis_loop's comments for why this split exists.
+    """
+    for series in config.TENNIS_SERIES:
             try:
                 markets = kmd.get_markets(series, status="open", limit=config.MAX_MARKETS_PER_SERIES)
             except Exception as e:
@@ -443,20 +487,12 @@ def tennis_loop(broker):
                         if opened:
                             already_signaled_events.add(ticker)
 
-        open_count = broker.get_open_position_count()
-        print(f"[tennis cycle done] balance=${broker.balance:.2f} open_positions={open_count}")
-        latest_status["balance"] = round(broker.balance, 2)
-        latest_status["open_positions"] = open_count
-        latest_status["last_cycle_ts"] = time.time()
-        latest_status["environment"] = config.ENVIRONMENT
-        latest_status["tennis"]["last_cycle_ts"] = time.time()
-        time.sleep(TENNIS_POLL_INTERVAL_SECONDS)
-
 
 def momentum_loop(broker):
     """BTC momentum. Runs in its own thread against the shared broker."""
     already_signaled_events: set[str] = set()
     cooldown_until: dict[str, float] = {}
+    last_entry_scan_ts = 0.0  # entry-scanning is throttled separately from exit-checks -- see below
 
     while _running:
         halted = False
@@ -514,11 +550,38 @@ def momentum_loop(broker):
             print(f"[HALT] momentum_loop stopping: {halt_reason}")
             break
 
-        try:
-            btc_trend = coinbase_data.get_btc_trend(lookback_minutes=config.MOMENTUM_BTC_LOOKBACK_MINUTES)
-        except Exception as e:
-            print(f"[warn] Coinbase BTC trend fetch failed, skipping this cycle: {e}")
-            btc_trend = None
+        # Entry-scanning is throttled to roughly MOMENTUM_POLL_INTERVAL_SECONDS,
+        # independent of how often the exit-check loop above actually runs
+        # (MOMENTUM_EXIT_CHECK_INTERVAL_SECONDS, much faster) -- see
+        # TENNIS_EXIT_CHECK_INTERVAL_SECONDS's comment for the real
+        # production incident this fixes.
+        scan_now = time.time()
+        if scan_now - last_entry_scan_ts >= MOMENTUM_POLL_INTERVAL_SECONDS:
+            last_entry_scan_ts = scan_now
+            _momentum_entry_scan(broker, already_signaled_events, cooldown_until)
+
+        open_count = broker.get_open_position_count()
+        print(f"[momentum cycle done] balance=${broker.balance:.2f} open_positions={open_count}")
+        latest_status["balance"] = round(broker.balance, 2)
+        latest_status["open_positions"] = open_count
+        latest_status["last_cycle_ts"] = time.time()
+        latest_status["environment"] = config.ENVIRONMENT
+        latest_status["momentum"]["last_cycle_ts"] = time.time()
+        time.sleep(MOMENTUM_EXIT_CHECK_INTERVAL_SECONDS)
+
+
+def _momentum_entry_scan(broker, already_signaled_events, cooldown_until):
+    """
+    The actual entry-scanning pass: fetches the real Coinbase trend once,
+    then checks each configured series' candidates. Extracted into its own
+    function so momentum_loop can throttle how often this (relatively slow,
+    many-request) pass runs, independently of how often exit-checks run.
+    """
+    try:
+        btc_trend = coinbase_data.get_btc_trend(lookback_minutes=config.MOMENTUM_BTC_LOOKBACK_MINUTES)
+    except Exception as e:
+        print(f"[warn] Coinbase BTC trend fetch failed, skipping this cycle: {e}")
+        btc_trend = None
 
         for series in config.CRYPTO_SERIES:
             try:
@@ -619,15 +682,6 @@ def momentum_loop(broker):
                 # skip that hid this for hours on Sep 21
                 print(f"[momentum diag] {series}: signal fired but all {len(candidates)} "
                       f"candidate strikes already held or cooling down, skipping this cycle")
-
-        open_count = broker.get_open_position_count()
-        print(f"[momentum cycle done] balance=${broker.balance:.2f} open_positions={open_count}")
-        latest_status["balance"] = round(broker.balance, 2)
-        latest_status["open_positions"] = open_count
-        latest_status["last_cycle_ts"] = time.time()
-        latest_status["environment"] = config.ENVIRONMENT
-        latest_status["momentum"]["last_cycle_ts"] = time.time()
-        time.sleep(MOMENTUM_POLL_INTERVAL_SECONDS)
 
 
 def run():
