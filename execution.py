@@ -560,6 +560,9 @@ class KalshiLiveBroker:
             "time_in_force": "good_till_canceled" if is_maker else "immediate_or_cancel",
             "self_trade_prevention_type": "taker_at_cross",
         }
+        implied_cost = count * (yes_price_cents / 100.0)
+        print(f"[LIVE] order request: {ticker} side={book_side} count={body['count']} "
+              f"price={body['price']} implied_cost=${implied_cost:.2f} current_balance=${self.balance:.2f}")
         result = self._request("POST", "/trade-api/v2/portfolio/events/orders", json_body=body)
         return result.get("order_id")
 
