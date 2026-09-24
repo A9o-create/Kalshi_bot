@@ -318,8 +318,19 @@ class KalshiLiveBroker:
 
     def _request(self, method: str, path: str, params: dict = None, json_body: dict = None) -> dict:
         import requests
-        url = self.base_url + path
-        headers = self._headers(method, path)  # path only, never the query string -- see docstring
+        # `path` always includes the full "/trade-api/v2/..." prefix -- required
+        # for the signature (confirmed against Kalshi's own docs: the signed
+        # string uses the complete path, not a suffix). self.base_url ALSO
+        # already includes "/trade-api/v2" (shared with kalshi_market_data.py's
+        # own calls, which correctly rely on that and must not be touched).
+        # Real production bug (Sep 24, first live connection attempt ever):
+        # naively concatenating base_url + path doubled "/trade-api/v2",
+        # producing a 404 on every single endpoint. Fix: derive the bare
+        # domain from base_url for URL construction only, while the
+        # signature below still signs the full, unmodified `path`.
+        domain_only = self.base_url.split("/trade-api/v2")[0]
+        url = domain_only + path
+        headers = self._headers(method, path)  # signs the FULL path, unchanged -- see docstring
         resp = requests.request(method, url, headers=headers, params=params, json=json_body, timeout=10)
         resp.raise_for_status()
         return resp.json()
