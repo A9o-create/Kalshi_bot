@@ -187,11 +187,20 @@ class PaperBroker:
             contracts = pos.filled_contracts or max(1, int(pos.size_dollars / (pos.entry_price_cents / 100.0)))
             fee = kalshi_maker_fee_dollars(contracts, fill_price) if was_maker else kalshi_taker_fee_dollars(contracts, fill_price)
 
-            # simplified P&L: for YES, profit if price went up; for NO, profit if price went down
+            # P&L: proceeds minus cost, per contract, linear in price -- NOT a
+            # percentage return on size_dollars. Real Kalshi contracts pay $1
+            # if correct, $0 if not; a price move of D cents on N contracts is
+            # worth N*D/100 dollars, period, regardless of entry price. Found
+            # Sep 24 while building the live order-placement migration: this
+            # used pos.size_dollars * pnl_pct instead, which is wrong by a
+            # factor of entry_price/100 -- silently understating P&L on every
+            # trade this entire session, worst on the cheap low-cents entries
+            # value_entry/momentum favor (e.g. a 10c entry understated real
+            # P&L by 90%). `contracts` was already computed above for the fee
+            # calculation; it just wasn't being used here too.
             price_delta = fill_price - pos.entry_price_cents
             direction_multiplier = 1 if pos.direction == "yes" else -1
-            pnl_pct = (price_delta * direction_multiplier) / 100.0  # cents -> fraction of $1 contract
-            pnl_dollars = pos.size_dollars * pnl_pct - fee  # fee eats directly into realized P&L
+            pnl_dollars = contracts * (price_delta * direction_multiplier) / 100.0 - fee
 
             self.balance += pnl_dollars
             self.daily_pnl += pnl_dollars
@@ -242,7 +251,9 @@ class KalshiLiveBroker:
       - Auth headers: KALSHI-ACCESS-KEY / -SIGNATURE / -TIMESTAMP
       - Signature = RSA-PSS(SHA256, MGF1-SHA256, salt_length=DIGEST_LENGTH)
         over the string f"{timestamp_ms}{METHOD}{path}" (path only, no query string)
-      - POST /portfolio/orders to place, GET /portfolio/balance to check funds
+      - POST /portfolio/events/orders to place (V2 -- see _place_order for the
+        Sep 24 migration off the deprecated /portfolio/orders), GET
+        /portfolio/balance to check funds
 
     Orders are placed as aggressive LIMIT orders (priced through the current
     market price) rather than true market orders, since the create-order
@@ -484,20 +495,60 @@ class KalshiLiveBroker:
 
         return order
 
-    def _place_order(self, ticker: str, side: str, action: str, count: int, price_cents: float) -> str:
-        """Places a single order, returns its order_id. Shared by both the maker attempt and taker fallback."""
+    def _place_order(self, ticker: str, side: str, action: str, count: int, price_cents: float, is_maker: bool) -> str:
+        """
+        Places a single order via Kalshi's V2 create-order endpoint
+        (POST /portfolio/events/orders), returns its order_id. Shared by
+        both the maker attempt and taker fallback.
+
+        Migrated Sep 24 after the legacy POST /portfolio/orders endpoint
+        started returning 410 Gone in the live shakedown -- confirmed via
+        Kalshi's own docs: that endpoint was slated for deprecation "no
+        earlier than May 6, 2026," which has since passed. The V2 endpoint
+        is a genuinely different shape, not just a different path:
+          - side is "bid"/"ask", always relative to the YES leg -- not "yes"/"no"
+          - no separate action (buy/sell) field -- folded into bid
+            (buy yes / sell no) vs ask (sell yes / buy no)
+          - price is a fixed-point DOLLAR string (e.g. "0.56"), not integer cents
+          - count is a fixed-point string too (e.g. "10.00"), not a plain int
+          - self_trade_prevention_type is newly required
+          - the response is FLAT (order_id at the top level), not nested
+            under an "order" key like the legacy response was
+
+        Translation from the old (side, action) pair to the V2 model,
+        derived directly from Kalshi's own definition ("bid means buy YES,
+        ask means sell YES; selling YES is economically equivalent to
+        buying NO at 1-price") and verified against all four cases:
+          yes+buy  -> bid, price unchanged
+          yes+sell -> ask, price unchanged
+          no+buy   -> ask, price = 100 - price   (buying NO = selling YES at 1-price)
+          no+sell  -> bid, price = 100 - price   (selling NO = buying YES at 1-price)
+
+        _fill_maker_then_taker's maker/taker distinction maps onto
+        time_in_force: a resting maker attempt uses good_till_canceled (we
+        poll and cancel it ourselves on timeout); the aggressive taker
+        fallback uses immediate_or_cancel.
+        """
         price_cents = min(99, max(1, int(round(price_cents))))
+
+        if side == "yes":
+            book_side = "bid" if action == "buy" else "ask"
+            yes_price_cents = price_cents
+        else:  # side == "no"
+            book_side = "ask" if action == "buy" else "bid"
+            yes_price_cents = 100 - price_cents
+
         body = {
             "ticker": ticker,
             "client_order_id": str(self._uuid.uuid4()),
-            "side": side,
-            "action": action,
-            "count": count,
-            "type": "limit",
-            f"{side}_price": price_cents,
+            "side": book_side,
+            "count": f"{count:.2f}",
+            "price": f"{yes_price_cents / 100.0:.2f}",
+            "time_in_force": "good_till_canceled" if is_maker else "immediate_or_cancel",
+            "self_trade_prevention_type": "taker_at_cross",
         }
-        result = self._request("POST", "/trade-api/v2/portfolio/orders", json_body=body)
-        return result.get("order", {}).get("order_id")
+        result = self._request("POST", "/trade-api/v2/portfolio/events/orders", json_body=body)
+        return result.get("order_id")
 
     def _fill_maker_then_taker(self, ticker: str, side: str, action: str, requested_contracts: int,
                                 maker_price_cents: float, taker_price_cents: float) -> tuple:
@@ -508,7 +559,7 @@ class KalshiLiveBroker:
         aggressive taker order at taker_price_cents for the remainder.
         Returns (total_filled_contracts, size_weighted_avg_fill_price_cents).
         """
-        maker_order_id = self._place_order(ticker, side, action, requested_contracts, maker_price_cents)
+        maker_order_id = self._place_order(ticker, side, action, requested_contracts, maker_price_cents, is_maker=True)
         print(f"[LIVE] maker attempt: {ticker} {side} x{requested_contracts} @ {maker_price_cents:.0f}c, order_id={maker_order_id}")
         maker_final = self._poll_until_filled_or_timeout(maker_order_id, timeout_seconds=config.MAKER_ATTEMPT_TIMEOUT_SECONDS)
         maker_filled = maker_final.get("fill_count", 0)
@@ -520,7 +571,7 @@ class KalshiLiveBroker:
                 print(f"[LIVE] maker filled {maker_filled}/{requested_contracts}, falling back to taker for the remaining {remainder}")
             else:
                 print(f"[LIVE] maker attempt filled 0, falling back to taker for all {remainder}")
-            taker_order_id = self._place_order(ticker, side, action, remainder, taker_price_cents)
+            taker_order_id = self._place_order(ticker, side, action, remainder, taker_price_cents, is_maker=False)
             taker_final = self._poll_until_filled_or_timeout(taker_order_id)
             taker_filled = taker_final.get("fill_count", 0)
 
@@ -693,10 +744,13 @@ class KalshiLiveBroker:
                 pos.status = "open"
             return
 
+        # P&L: proceeds minus cost, per contract, linear in price -- see
+        # PaperBroker's close_position for the full explanation of the bug
+        # this fixes (was scaling by entry-price-derived closed_size_dollars
+        # instead of contracts directly, wrong by a factor of entry_price/100).
         price_delta = weighted_exit_price - pos.entry_price_cents
         direction_multiplier = 1 if pos.direction == "yes" else -1
-        closed_size_dollars = closed_contracts * (pos.entry_price_cents / 100.0)
-        pnl_dollars = closed_size_dollars * (price_delta * direction_multiplier) / 100.0
+        pnl_dollars = closed_contracts * (price_delta * direction_multiplier) / 100.0
 
         with self._lock:
             self.daily_pnl += pnl_dollars
