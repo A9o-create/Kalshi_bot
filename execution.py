@@ -659,15 +659,47 @@ class KalshiLiveBroker:
     # --- order fill polling ---
 
     def _get_order(self, order_id: str, exchange_index: int = 0) -> dict:
-        # exchange_index passed as a query param -- added Sep 25 after a real
-        # order placed on shard 3 came back 404 "not_found" when checked
-        # without it, since the check was implicitly looking on the default
-        # shard (0) instead of wherever the order actually landed.
-        return self._request("GET", f"/trade-api/v2/portfolio/orders/{order_id}",
-                              params={"exchange_index": exchange_index}).get("order", {})
+        """
+        Finds a specific order's current state via the LIST endpoint
+        (GET /portfolio/orders?exchange_index=X), filtering for our
+        order_id client-side -- NOT the single-order-by-id endpoint
+        (GET /portfolio/orders/{order_id}). Migrated Sep 25 after real
+        production data showed the singular endpoint 404ing consistently,
+        every single time, even with the correct exchange_index included
+        as a query parameter. Kalshi's own changelog confirms
+        exchange_index filtering was added specifically to the LIST
+        endpoints (GET /portfolio/orders, /portfolio/positions,
+        /portfolio/fills) -- not confirmed for the singular by-id lookup,
+        which appears to ignore it and always resolve against the default
+        shard regardless of what's passed.
+
+        Normalizes both possible field-naming conventions this session's
+        research has found inconsistently documented across different
+        Kalshi endpoint pages: plain-int (fill_count, remaining_count) and
+        fixed-point-string V2 style (fill_count_fp, remaining_count_fp).
+        """
+        data = self._request("GET", "/trade-api/v2/portfolio/orders", params={"exchange_index": exchange_index})
+        for order in data.get("orders", []):
+            if order.get("order_id") == order_id:
+                normalized = dict(order)
+                if "fill_count" not in normalized and "fill_count_fp" in normalized:
+                    normalized["fill_count"] = int(float(normalized["fill_count_fp"]))
+                if "remaining_count" not in normalized and "remaining_count_fp" in normalized:
+                    normalized["remaining_count"] = int(float(normalized["remaining_count_fp"]))
+                return normalized
+        return {}  # not (yet) visible in this shard's order list
 
     def _cancel_order(self, order_id: str, exchange_index: int = 0) -> dict:
-        return self._request("DELETE", f"/trade-api/v2/portfolio/orders/{order_id}",
+        """
+        Cancelling is a write, not a read -- migrated Sep 25 to the same V2
+        events family order creation already uses
+        (DELETE /portfolio/events/orders/{order_id}), matching the pattern
+        confirmed across create/amend/decrease all living under
+        /portfolio/events/orders/*. The old legacy DELETE path this used
+        to call was never confirmed correct for anything but happened to
+        share the bug the GET fix above addresses.
+        """
+        return self._request("DELETE", f"/trade-api/v2/portfolio/events/orders/{order_id}",
                               params={"exchange_index": exchange_index})
 
     def _poll_until_filled_or_timeout(self, order_id: str, exchange_index: int = 0, timeout_seconds: float = None) -> dict:
