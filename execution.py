@@ -571,10 +571,21 @@ class KalshiLiveBroker:
             # whether omitting this field doesn't actually default to the
             # primary subaccount the way the docs describe.
             "subaccount": 0,
+            # Explicit, not omitted -- confirmed via the real balance breakdown
+            # logged on this exact startup: total $150.01 is split across FOUR
+            # exchange_index shards (0: $135.73, 1: $0.00, 2: $11.64, 3: $2.64).
+            # The schema says this "auto-routes when ticker is provided" if
+            # omitted -- but every order attempt so far has failed with
+            # insufficient_balance despite tiny order sizes against a genuinely
+            # funded account, which is exactly what you'd see if auto-routing
+            # were sending tennis/BTC orders to the empty shard (index 1)
+            # instead of index 0, where the bulk of the real funds actually sit.
+            "exchange_index": 0,
         }
         implied_cost = count * (yes_price_cents / 100.0)
         print(f"[LIVE] order request: {ticker} side={book_side} count={body['count']} "
-              f"price={body['price']} subaccount={body['subaccount']} implied_cost=${implied_cost:.2f} current_balance=${self.balance:.2f}")
+              f"price={body['price']} subaccount={body['subaccount']} exchange_index={body['exchange_index']} "
+              f"implied_cost=${implied_cost:.2f} current_balance=${self.balance:.2f}")
         result = self._request("POST", "/trade-api/v2/portfolio/events/orders", json_body=body)
         return result.get("order_id")
 
