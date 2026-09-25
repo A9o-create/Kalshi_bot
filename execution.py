@@ -293,6 +293,7 @@ class KalshiLiveBroker:
         self.starting_balance = self.get_balance()
         self.balance = self.starting_balance
         self._sync_positions_from_kalshi()
+        self._log_exchange_shard_status()
 
         # Fill-waiting used to block the caller for up to ORDER_FILL_TIMEOUT_SECONDS
         # per order, which meant only one position could be opened/closed at a
@@ -466,6 +467,32 @@ class KalshiLiveBroker:
                       f"(strategy/entry_price INFERRED -- verify against the real account)")
         else:
             print("[LIVE] No open positions found on Kalshi -- starting with a clean slate.")
+
+    def _log_exchange_shard_status(self):
+        """
+        Pure read-only diagnostic, logged once on startup: queries the
+        public GET /exchange/status endpoint and prints, per shard, whether
+        intra-exchange transfers are actually enabled right now -- real
+        data instead of guessing from a rollout timeline. Added Sep 25 to
+        answer whether shards 2 (Crypto) and 3 (Sports) specifically
+        support transfers yet, which determines whether building an
+        automatic-rebalancing feature against that endpoint is even
+        possible currently. Fails open (logs a warning, never raises) --
+        this is diagnostic only and must never block startup.
+        """
+        try:
+            status = kalshi_market_data.get_exchange_status()
+            print(f"[LIVE] Exchange status: active={status.get('exchange_active')} "
+                  f"trading={status.get('trading_active')} "
+                  f"transfers={status.get('intra_exchange_transfers_active')}")
+            for shard in status.get("exchange_index_statuses", []):
+                print(f"[LIVE]   shard {shard.get('exchange_index')} "
+                      f"({shard.get('description', 'no description')}): "
+                      f"active={shard.get('exchange_active')} "
+                      f"trading={shard.get('trading_active')} "
+                      f"transfers_active={shard.get('intra_exchange_transfers_active')}")
+        except Exception as e:
+            print(f"[warn] couldn't fetch exchange shard status (diagnostic only, non-fatal): {e}")
 
     # --- order fill polling ---
 

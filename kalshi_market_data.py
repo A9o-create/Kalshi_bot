@@ -79,6 +79,24 @@ def _base_url() -> str:
     return config.KALSHI_API_BASE_URL
 
 
+def get_exchange_status() -> dict:
+    """
+    GET /exchange/status -- public, unauthenticated, read-only. Returns
+    exchange-wide status plus a per-shard breakdown (exchange_index_statuses),
+    each with its own intra_exchange_transfers_active flag.
+
+    Added Sep 25 specifically to answer, with real data instead of guessing
+    from a possibly-stale rollout timeline, whether intra-exchange transfers
+    are actually enabled for the specific shards we need (2: Crypto,
+    3: Sports) -- Kalshi's own docs mention transfers being enabled "to
+    exchange index 1" as of Aug 6, 2026, with no explicit mention of shards
+    2/3. This makes zero API calls that touch balance or orders; it's pure
+    read-only diagnostic.
+    """
+    resp = _get(f"{_base_url()}/exchange/status")
+    return resp.json()
+
+
 _markets_cache = {}  # {(series_ticker, status, limit): (fetched_at, markets)}
 
 
