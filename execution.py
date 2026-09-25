@@ -239,6 +239,15 @@ class PaperBroker:
         with self._lock:
             return list(self.open_positions.values())
 
+    def get_trading_shard_balance(self) -> float:
+        """
+        Paper mode has no shard concept -- returns the same total balance
+        it always has. Exists so _should_halt() can call this uniformly
+        across both broker types; see KalshiLiveBroker's version for the
+        real, shard-aware logic this mirrors.
+        """
+        return self.balance
+
     def shutdown(self, wait: bool = True):
         pass  # nothing to clean up in paper mode
 
@@ -295,6 +304,7 @@ class KalshiLiveBroker:
         self._sync_positions_from_kalshi()
         self._log_exchange_shard_status()
         self._maybe_run_one_time_shard_rebalance()
+        self._trading_shard_balance_cache = None  # (timestamp, value) -- see get_trading_shard_balance()
 
         # Fill-waiting used to block the caller for up to ORDER_FILL_TIMEOUT_SECONDS
         # per order, which meant only one position could be opened/closed at a
@@ -494,6 +504,57 @@ class KalshiLiveBroker:
                       f"transfers_active={shard.get('intra_exchange_transfers_active')}")
         except Exception as e:
             print(f"[warn] couldn't fetch exchange shard status (diagnostic only, non-fatal): {e}")
+
+    TRADING_SHARDS = [2, 3]  # Crypto and Sports -- the only shards either leg actually trades on.
+                             # Deliberately excludes shard 0 (Default/Legacy): the account-wide
+                             # hard_balance_floor_breached() check used to watch TOTAL balance,
+                             # which could stay well above the floor even if the shards actually
+                             # being traded were fully drained, because idle funds sitting in
+                             # shard 0 (never traded) would mask it. This is what the floor is
+                             # actually meant to protect against, so it needs to watch these two
+                             # shards specifically, not the account total.
+
+    def get_trading_shard_balance(self) -> float:
+        """
+        Real, combined balance across TRADING_SHARDS only (shards 2+3),
+        excluding idle shard 0/1 funds that were never at trading risk.
+        Added Sep 25 specifically to fix hard_balance_floor_breached()
+        watching the wrong number once funds were split across shards --
+        the account total could sit comfortably above the floor even with
+        both trading shards fully drained, since idle money elsewhere
+        would mask it.
+
+        Cached for SHARD_BALANCE_CACHE_TTL_SECONDS -- _should_halt() calls
+        this on every fast exit-check cycle (every ~15s in both loops), and
+        a real network call on every single one of those would meaningfully
+        add to request volume for a value that doesn't need to be
+        millisecond-fresh; this is a backstop check sitting below the
+        faster-reacting daily-loss and peak-drawdown checks already, so a
+        brief caching window is an acceptable, deliberate tradeoff -- not
+        an oversight.
+        """
+        now = time.time()
+        if self._trading_shard_balance_cache is not None:
+            cached_ts, cached_value = self._trading_shard_balance_cache
+            if now - cached_ts < config.SHARD_BALANCE_CACHE_TTL_SECONDS:
+                return cached_value
+
+        try:
+            data = self._request("GET", "/trade-api/v2/portfolio/balance")
+            breakdown = data.get("balance_breakdown", [])
+            total = sum(
+                float(shard.get("balance", 0))
+                for shard in breakdown
+                if shard.get("exchange_index") in self.TRADING_SHARDS
+            )
+        except Exception as e:
+            print(f"[warn] couldn't fetch trading-shard balance, using last known value: {e}")
+            if self._trading_shard_balance_cache is not None:
+                return self._trading_shard_balance_cache[1]
+            return self.balance  # no cache yet and the fetch failed -- fail open with the total, better than crashing
+
+        self._trading_shard_balance_cache = (now, total)
+        return total
 
     def transfer_between_shards(self, source_shard: int, destination_shard: int, amount_dollars: float) -> str:
         """

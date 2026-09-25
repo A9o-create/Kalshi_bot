@@ -207,7 +207,23 @@ DAILY_LOSS_CAP_PCT = 0.18                # was 0.10 -- halts on NET cumulative l
 # around an $18 pullback), so this only ever binds if something goes wrong
 # badly enough that neither percentage check caught it first -- a genuine
 # last resort, not a redundant duplicate of the other two.
+#
+# In live_prod specifically, this is checked against the COMBINED balance
+# of shards 2+3 (the only shards either leg trades on) via
+# KalshiLiveBroker.get_trading_shard_balance() -- not the account total.
+# Added Sep 25 after funds got split across shards: the total could sit
+# well above $25 even with both trading shards fully drained, since idle
+# funds elsewhere would mask it. paper_prod is unaffected -- PaperBroker
+# has no shard concept and this still watches its one total balance.
 MIN_BALANCE_DOLLARS = 25.0
+# How long get_trading_shard_balance() trusts its last real fetch before
+# refreshing. _should_halt() calls this on every fast exit-check cycle
+# (~15s in both loops); a real network call on every single one would add
+# meaningfully to request volume for a value that doesn't need
+# millisecond freshness -- this sits below two faster-reacting checks
+# already (daily loss cap, peak-drawdown), so some staleness here is a
+# deliberate, acceptable tradeoff for a backstop check.
+SHARD_BALANCE_CACHE_TTL_SECONDS = 45
 # Halts if the session gives back this much (as a % of starting balance)
 # from its own intraday peak, even if net loss from the start hasn't hit
 # DAILY_LOSS_CAP_PCT yet -- catches a large peak-to-trough swing that a

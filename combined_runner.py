@@ -283,8 +283,9 @@ def _should_halt(broker):
     """
     if risk.daily_loss_breached(broker.daily_pnl, broker.starting_balance):
         return True, f"daily loss cap breached (pnl=${broker.daily_pnl:.2f}, cap={config.DAILY_LOSS_CAP_PCT*100:.0f}%)"
-    if risk.hard_balance_floor_breached(broker.balance):
-        return True, f"hard balance floor breached (balance=${broker.balance:.2f}, floor=${config.MIN_BALANCE_DOLLARS:.2f})"
+    trading_shard_balance = broker.get_trading_shard_balance()
+    if risk.hard_balance_floor_breached(trading_shard_balance):
+        return True, f"hard balance floor breached (trading shard balance=${trading_shard_balance:.2f}, floor=${config.MIN_BALANCE_DOLLARS:.2f})"
     if risk.drawdown_from_peak_breached(broker.daily_pnl, broker.peak_daily_pnl, broker.starting_balance):
         return True, f"peak drawdown breached (pnl=${broker.daily_pnl:.2f}, peak=${broker.peak_daily_pnl:.2f}, cap={config.PEAK_DRAWDOWN_CAP_PCT*100:.0f}%)"
     return False, None
