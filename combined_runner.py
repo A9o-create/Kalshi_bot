@@ -33,6 +33,7 @@ import time
 import signal as os_signal
 import sys
 import threading
+from datetime import datetime, timezone
 
 import config
 import signals
@@ -159,6 +160,33 @@ def _market_age_seconds(trades: list) -> float:
     if not trades:
         return float("inf")
     return time.time() - trades[0]["ts"]
+
+
+def _closes_today(market: dict) -> bool:
+    """
+    True if a market's close_time falls on today's calendar date (UTC).
+    Added Sep 25 specifically for tennis, after a real position was opened
+    on a match that doesn't close until the next day -- meaning it would
+    sit open overnight through the shakedown period, undesirable while the
+    account is still being validated.
+
+    Checks close_time only, not open_time -- the concern is specifically
+    about not holding a position overnight, and close_time alone fully
+    determines that regardless of when the market happened to open.
+
+    Field confirmed against Kalshi's own documented Market schema
+    (close_time, ISO 8601). A missing or unparseable timestamp is excluded
+    rather than risked through.
+    """
+    close_time_str = market.get("close_time")
+    if not close_time_str:
+        return False
+    try:
+        close_dt = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    today_utc = datetime.now(timezone.utc).date()
+    return close_dt.date() == today_utc
 
 
 def _parse_strike_threshold(ticker: str):
@@ -393,6 +421,12 @@ def _tennis_entry_scan(broker, already_signaled_events, cooldown_until):
             except Exception as e:
                 print(f"[warn] couldn't fetch markets for {series}: {e}")
                 continue
+
+            # Only trade matches that close today (UTC) -- added Sep 25 after
+            # a real position was opened on a match that doesn't close until
+            # the next day, leaving it open overnight. Applied before any
+            # strategy gets a chance to evaluate the market at all.
+            markets = [m for m in markets if _closes_today(m)]
 
             for m in markets:
                 ticker = m["ticker"]
