@@ -542,8 +542,20 @@ class KalshiLiveBroker:
         time_in_force: a resting maker attempt uses good_till_canceled (we
         poll and cancel it ourselves on timeout); the aggressive taker
         fallback uses immediate_or_cancel.
+
+        exchange_index: tried across FUNDED_EXCHANGE_INDICES in sequence
+        (Sep 25) -- real evidence shows different markets are hosted on
+        different shards. Forcing a single fixed index fixed
+        insufficient_balance for some tickers but broke others with
+        market_not_found; omitting it entirely (relying on documented
+        "auto-routes when ticker is provided") brought insufficient_balance
+        back for tickers that evidently auto-route to the $0.00 shard
+        (index 1, confirmed via the real balance breakdown and excluded
+        here). Tries each funded shard until one order succeeds, same
+        fallback pattern already used for momentum's strike selection.
         """
         price_cents = min(99, max(1, int(round(price_cents))))
+        import requests
 
         if side == "yes":
             book_side = "bid" if action == "buy" else "ask"
@@ -552,41 +564,36 @@ class KalshiLiveBroker:
             book_side = "ask" if action == "buy" else "bid"
             yes_price_cents = 100 - price_cents
 
-        body = {
-            "ticker": ticker,
-            "client_order_id": str(self._uuid.uuid4()),
-            "side": book_side,
-            "count": f"{count:.2f}",
-            "price": f"{yes_price_cents / 100.0:.2f}",
-            "time_in_force": "good_till_canceled" if is_maker else "immediate_or_cancel",
-            "self_trade_prevention_type": "taker_at_cross",
-            # Explicit, not omitted -- Kalshi's own docs show a COMPLETE working
-            # example that always includes this field ("0 is the primary
-            # subaccount"), even though the schema marks it optional. Added
-            # Sep 24 after every order attempt failed with insufficient_balance
-            # despite tiny orders ($4-5) against a genuinely funded $150.01
-            # predictions balance -- confirmed via a real manual trade the
-            # account itself works fine, and the API key is confirmed scoped
-            # to predictions, not the separate ~$5.56 perpetuals pool. Testing
-            # whether omitting this field doesn't actually default to the
-            # primary subaccount the way the docs describe.
-            "subaccount": 0,
-        }
-        # exchange_index deliberately OMITTED (Sep 25): explicitly forcing it
-        # to 0 fixed insufficient_balance (confirmed -- that error stopped
-        # appearing entirely), but immediately produced a DIFFERENT error,
-        # market_not_found, on the very next real order -- this specific
-        # ticker apparently isn't hosted on shard 0. Different markets are
-        # evidently routed to different shards, and the schema's own
-        # "auto-routes when ticker is provided" was correct all along. The
-        # real fix was subaccount alone; forcing exchange_index was an
-        # over-correction that broke a different, working code path.
         implied_cost = count * (yes_price_cents / 100.0)
-        print(f"[LIVE] order request: {ticker} side={book_side} count={body['count']} "
-              f"price={body['price']} subaccount={body['subaccount']} "
-              f"implied_cost=${implied_cost:.2f} current_balance=${self.balance:.2f}")
-        result = self._request("POST", "/trade-api/v2/portfolio/events/orders", json_body=body)
-        return result.get("order_id")
+        last_error = None
+        for exchange_index in self.FUNDED_EXCHANGE_INDICES:
+            body = {
+                "ticker": ticker,
+                "client_order_id": str(self._uuid.uuid4()),
+                "side": book_side,
+                "count": f"{count:.2f}",
+                "price": f"{yes_price_cents / 100.0:.2f}",
+                "time_in_force": "good_till_canceled" if is_maker else "immediate_or_cancel",
+                "self_trade_prevention_type": "taker_at_cross",
+                "subaccount": 0,
+                "exchange_index": exchange_index,
+            }
+            print(f"[LIVE] order request: {ticker} side={book_side} count={body['count']} "
+                  f"price={body['price']} exchange_index={exchange_index} "
+                  f"implied_cost=${implied_cost:.2f} current_balance=${self.balance:.2f}")
+            try:
+                result = self._request("POST", "/trade-api/v2/portfolio/events/orders", json_body=body)
+                return result.get("order_id")
+            except requests.exceptions.HTTPError as e:
+                last_error = e
+                print(f"[warn] exchange_index={exchange_index} failed for {ticker}, trying next: {e}")
+                continue
+        raise last_error
+
+    # Shards confirmed to hold real funds via the real balance breakdown
+    # logged on startup (index 1 excluded -- confirmed $0.00). Order matches
+    # the breakdown's own funding order, trying the most-funded shard first.
+    FUNDED_EXCHANGE_INDICES = [0, 2, 3]
 
     def _fill_maker_then_taker(self, ticker: str, side: str, action: str, requested_contracts: int,
                                 maker_price_cents: float, taker_price_cents: float) -> tuple:
