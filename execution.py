@@ -294,6 +294,7 @@ class KalshiLiveBroker:
         self.balance = self.starting_balance
         self._sync_positions_from_kalshi()
         self._log_exchange_shard_status()
+        self._maybe_run_one_time_shard_rebalance()
 
         # Fill-waiting used to block the caller for up to ORDER_FILL_TIMEOUT_SECONDS
         # per order, which meant only one position could be opened/closed at a
@@ -493,6 +494,106 @@ class KalshiLiveBroker:
                       f"transfers_active={shard.get('intra_exchange_transfers_active')}")
         except Exception as e:
             print(f"[warn] couldn't fetch exchange shard status (diagnostic only, non-fatal): {e}")
+
+    def transfer_between_shards(self, source_shard: int, destination_shard: int, amount_dollars: float) -> str:
+        """
+        POST /portfolio/intra_exchange_instance_transfer -- moves real funds
+        between two exchange shards within the same account. Added Sep 25
+        for the manual shard rebalance: most of the real $150.01 balance
+        was sitting on shard 0 (Default/Legacy, which neither leg trades),
+        while shards 2 (Crypto) and 3 (Sports) -- the ones actually used --
+        were underfunded, causing every real order attempt to fail with
+        insufficient_balance despite the account overall being well funded.
+
+        Confirmed via Kalshi's own OpenAPI schema (two independent doc
+        pages agree) before writing this: `amount` is in CENTICENTS, not
+        cents -- a different unit than every other dollar figure in this
+        codebase (which uses cents or dollar-strings). Getting this wrong
+        would move 100x too much or too little, so this is deliberately
+        NOT reusing any existing cents/dollars helper -- amount_dollars is
+        converted directly, once, right here: 1 dollar = 100 cents =
+        10,000 centicents.
+
+        `source`/`destination` are a SEPARATE axis from the shard indices
+        -- this same endpoint also moves funds between event-contract
+        trading and margined/perpetuals trading (values "event_contract" /
+        "margined"). For a same-product shard rebalance, both must be
+        "event_contract" -- only the shard numbers actually differ.
+
+        Also confirmed live via _log_exchange_shard_status() immediately
+        before this was written: all four shards currently report
+        intra_exchange_transfers_active=True, despite this endpoint's own
+        static docs page carrying a blanket (and evidently stale)
+        "currently not available" notice.
+
+        Real, documented risk from Kalshi's own docs: cross-shard
+        transfers execute in up to three non-atomic steps. If a step
+        fails, funds may temporarily rest in the primary account on
+        the source or destination index rather than being lost outright
+        -- but this method does NOT retry automatically. A failure here
+        should be reviewed by a human (check the real account state)
+        rather than blindly reattempted.
+        """
+        amount_centicents = round(amount_dollars * 10000)
+        body = {
+            "source": "event_contract",
+            "destination": "event_contract",
+            "amount": amount_centicents,
+            "source_exchange_shard": source_shard,
+            "destination_exchange_shard": destination_shard,
+        }
+        print(f"[LIVE] Requesting transfer: ${amount_dollars:.2f} from shard {source_shard} to shard {destination_shard} "
+              f"(amount_centicents={amount_centicents})")
+        result = self._request("POST", "/trade-api/v2/portfolio/intra_exchange_instance_transfer", json_body=body)
+        transfer_id = result.get("transfer_id")
+        print(f"[LIVE] Transfer requested successfully: transfer_id={transfer_id}")
+        return transfer_id
+
+    def _maybe_run_one_time_shard_rebalance(self):
+        """
+        Executes the one-time shard rebalance -- moving real funds off
+        shard 0 (Default/Legacy, which neither leg trades) into shards 2
+        (Crypto) and 3 (Sports), the ones actually used -- ONLY if
+        EXECUTE_SHARD_REBALANCE=true is explicitly set as an environment
+        variable. Off by default; does nothing on a normal startup.
+
+        Deliberately gated this way rather than running automatically:
+        this moves real money, once, and should be triggered as its own
+        clearly-intentional deploy -- not silently on every restart. After
+        it runs, UNSET the env var before the next deploy, or it will
+        attempt to run again (the transfer itself isn't dangerous to
+        repeat, since amounts are small and shard 0 would simply have less
+        to give the second time, but there's no reason to leave it primed).
+
+        Amounts ($50 to shard 3, $50 to shard 2) leave roughly $35.73 as a
+        buffer in shard 0 rather than draining it completely. Each
+        transfer is attempted independently -- if one fails, the other
+        still proceeds and gets logged separately, rather than one failure
+        blocking both.
+        """
+        if os.environ.get("EXECUTE_SHARD_REBALANCE", "").lower() != "true":
+            return
+
+        print("=" * 70)
+        print("[LIVE] EXECUTING ONE-TIME SHARD REBALANCE -- REAL MONEY IS MOVING")
+        print("=" * 70)
+
+        transfers = [
+            (0, 3, 50.00, "Sports (tennis)"),
+            (0, 2, 50.00, "Crypto"),
+        ]
+        for source, destination, amount, label in transfers:
+            try:
+                self.transfer_between_shards(source, destination, amount)
+                print(f"[LIVE] Rebalance step OK: ${amount:.2f} -> shard {destination} ({label})")
+            except Exception as e:
+                print(f"[warn] Rebalance step FAILED: ${amount:.2f} -> shard {destination} ({label}): {e}")
+                print("[warn] Check the real account balance breakdown directly before assuming anything about where these funds are.")
+
+        print("=" * 70)
+        print("[LIVE] Shard rebalance attempt complete. UNSET EXECUTE_SHARD_REBALANCE now")
+        print("[LIVE] so this doesn't run again on the next redeploy.")
+        print("=" * 70)
 
     # --- order fill polling ---
 
