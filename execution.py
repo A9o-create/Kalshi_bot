@@ -496,13 +496,19 @@ class KalshiLiveBroker:
 
     # --- order fill polling ---
 
-    def _get_order(self, order_id: str) -> dict:
-        return self._request("GET", f"/trade-api/v2/portfolio/orders/{order_id}").get("order", {})
+    def _get_order(self, order_id: str, exchange_index: int = 0) -> dict:
+        # exchange_index passed as a query param -- added Sep 25 after a real
+        # order placed on shard 3 came back 404 "not_found" when checked
+        # without it, since the check was implicitly looking on the default
+        # shard (0) instead of wherever the order actually landed.
+        return self._request("GET", f"/trade-api/v2/portfolio/orders/{order_id}",
+                              params={"exchange_index": exchange_index}).get("order", {})
 
-    def _cancel_order(self, order_id: str) -> dict:
-        return self._request("DELETE", f"/trade-api/v2/portfolio/orders/{order_id}")
+    def _cancel_order(self, order_id: str, exchange_index: int = 0) -> dict:
+        return self._request("DELETE", f"/trade-api/v2/portfolio/orders/{order_id}",
+                              params={"exchange_index": exchange_index})
 
-    def _poll_until_filled_or_timeout(self, order_id: str, timeout_seconds: float = None) -> dict:
+    def _poll_until_filled_or_timeout(self, order_id: str, exchange_index: int = 0, timeout_seconds: float = None) -> dict:
         """
         Polls an order until it's fully filled or `timeout_seconds` elapses
         (defaults to ORDER_FILL_TIMEOUT_SECONDS). If anything is still
@@ -512,7 +518,7 @@ class KalshiLiveBroker:
         if timeout_seconds is None:
             timeout_seconds = config.ORDER_FILL_TIMEOUT_SECONDS
         deadline = time.time() + timeout_seconds
-        order = self._get_order(order_id)
+        order = self._get_order(order_id, exchange_index)
 
         while time.time() < deadline:
             status = order.get("status")
@@ -520,27 +526,30 @@ class KalshiLiveBroker:
             if status in ("executed", "canceled") or remaining == 0:
                 break
             time.sleep(config.ORDER_FILL_POLL_INTERVAL_SECONDS)
-            order = self._get_order(order_id)
+            order = self._get_order(order_id, exchange_index)
 
         if order.get("remaining_count", 0) > 0 and order.get("status") not in ("executed", "canceled"):
             fill_count_before_cancel = order.get("fill_count", 0)
             print(f"[LIVE] order {order_id} still has {order['remaining_count']} resting after "
                   f"{timeout_seconds}s, canceling remainder")
             try:
-                self._cancel_order(order_id)
+                self._cancel_order(order_id, exchange_index)
             except Exception as e:
                 print(f"[warn] cancel failed for {order_id}: {e} -- check manually, it may still be resting")
-            order = self._get_order(order_id)
+            order = self._get_order(order_id, exchange_index)
             # some cancel responses lag on fill_count; trust the higher of the two reads
             order["fill_count"] = max(order.get("fill_count", 0), fill_count_before_cancel)
 
         return order
 
-    def _place_order(self, ticker: str, side: str, action: str, count: int, price_cents: float, is_maker: bool) -> str:
+    def _place_order(self, ticker: str, side: str, action: str, count: int, price_cents: float, is_maker: bool):
         """
         Places a single order via Kalshi's V2 create-order endpoint
-        (POST /portfolio/events/orders), returns its order_id. Shared by
-        both the maker attempt and taker fallback.
+        (POST /portfolio/events/orders), returns (order_id, exchange_index)
+        -- the caller needs exchange_index too, since status-checks and
+        cancels on this order must target the SAME shard it actually landed
+        on (see _get_order/_cancel_order). Shared by both the maker attempt
+        and taker fallback.
 
         Migrated Sep 24 after the legacy POST /portfolio/orders endpoint
         started returning 410 Gone in the live shakedown -- confirmed via
@@ -610,7 +619,7 @@ class KalshiLiveBroker:
                   f"implied_cost=${implied_cost:.2f} current_balance=${self.balance:.2f}")
             try:
                 result = self._request("POST", "/trade-api/v2/portfolio/events/orders", json_body=body)
-                return result.get("order_id")
+                return result.get("order_id"), exchange_index
             except requests.exceptions.HTTPError as e:
                 last_error = e
                 print(f"[warn] exchange_index={exchange_index} failed for {ticker}, trying next: {e}")
@@ -631,9 +640,10 @@ class KalshiLiveBroker:
         aggressive taker order at taker_price_cents for the remainder.
         Returns (total_filled_contracts, size_weighted_avg_fill_price_cents).
         """
-        maker_order_id = self._place_order(ticker, side, action, requested_contracts, maker_price_cents, is_maker=True)
-        print(f"[LIVE] maker attempt: {ticker} {side} x{requested_contracts} @ {maker_price_cents:.0f}c, order_id={maker_order_id}")
-        maker_final = self._poll_until_filled_or_timeout(maker_order_id, timeout_seconds=config.MAKER_ATTEMPT_TIMEOUT_SECONDS)
+        maker_order_id, maker_exchange_index = self._place_order(ticker, side, action, requested_contracts, maker_price_cents, is_maker=True)
+        print(f"[LIVE] maker attempt: {ticker} {side} x{requested_contracts} @ {maker_price_cents:.0f}c, "
+              f"order_id={maker_order_id}, exchange_index={maker_exchange_index}")
+        maker_final = self._poll_until_filled_or_timeout(maker_order_id, maker_exchange_index, timeout_seconds=config.MAKER_ATTEMPT_TIMEOUT_SECONDS)
         maker_filled = maker_final.get("fill_count", 0)
 
         taker_filled = 0
@@ -643,8 +653,8 @@ class KalshiLiveBroker:
                 print(f"[LIVE] maker filled {maker_filled}/{requested_contracts}, falling back to taker for the remaining {remainder}")
             else:
                 print(f"[LIVE] maker attempt filled 0, falling back to taker for all {remainder}")
-            taker_order_id = self._place_order(ticker, side, action, remainder, taker_price_cents, is_maker=False)
-            taker_final = self._poll_until_filled_or_timeout(taker_order_id)
+            taker_order_id, taker_exchange_index = self._place_order(ticker, side, action, remainder, taker_price_cents, is_maker=False)
+            taker_final = self._poll_until_filled_or_timeout(taker_order_id, taker_exchange_index)
             taker_filled = taker_final.get("fill_count", 0)
 
         total_filled = maker_filled + taker_filled
