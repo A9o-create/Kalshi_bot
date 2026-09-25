@@ -366,6 +366,7 @@ class KalshiLiveBroker:
 
     def get_balance(self) -> float:
         data = self._request("GET", "/trade-api/v2/portfolio/balance")
+        print(f"[LIVE] raw balance response: {data}")
         # balance is returned in cents per Kalshi's convention
         return data.get("balance", 0) / 100.0
 
@@ -559,10 +560,21 @@ class KalshiLiveBroker:
             "price": f"{yes_price_cents / 100.0:.2f}",
             "time_in_force": "good_till_canceled" if is_maker else "immediate_or_cancel",
             "self_trade_prevention_type": "taker_at_cross",
+            # Explicit, not omitted -- Kalshi's own docs show a COMPLETE working
+            # example that always includes this field ("0 is the primary
+            # subaccount"), even though the schema marks it optional. Added
+            # Sep 24 after every order attempt failed with insufficient_balance
+            # despite tiny orders ($4-5) against a genuinely funded $150.01
+            # predictions balance -- confirmed via a real manual trade the
+            # account itself works fine, and the API key is confirmed scoped
+            # to predictions, not the separate ~$5.56 perpetuals pool. Testing
+            # whether omitting this field doesn't actually default to the
+            # primary subaccount the way the docs describe.
+            "subaccount": 0,
         }
         implied_cost = count * (yes_price_cents / 100.0)
         print(f"[LIVE] order request: {ticker} side={book_side} count={body['count']} "
-              f"price={body['price']} implied_cost=${implied_cost:.2f} current_balance=${self.balance:.2f}")
+              f"price={body['price']} subaccount={body['subaccount']} implied_cost=${implied_cost:.2f} current_balance=${self.balance:.2f}")
         result = self._request("POST", "/trade-api/v2/portfolio/events/orders", json_body=body)
         return result.get("order_id")
 
