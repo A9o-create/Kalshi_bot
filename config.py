@@ -97,6 +97,22 @@ MOMENTUM_BTC_LOOKBACK_MINUTES = 2
 # paper mode, which isn't realistic -- this skips the trade instead if
 # fewer than this many contracts are resting at the relevant price level.
 MOMENTUM_MIN_LIQUIDITY_CONTRACTS = 5
+# Skips a momentum trade entirely (tries the next candidate strike instead,
+# reusing the existing fallback) if Kelly sizing comes out below this --
+# rather than force it up with a hard floor on contract count, which would
+# have distorted the sizing logic's own confidence signal (a small Kelly
+# size means genuinely low confidence in that specific trade). Not really
+# a fee-RATIO argument -- Kalshi's fee scales linearly with contracts, so
+# the fee stays roughly the same % of trade size regardless of count.
+# The real issues at very small size are fee ROUNDING (rounds up to the
+# nearest cent, which bites harder proportionally on a tiny notional) and
+# opportunity cost -- a $0.18 trade ties up one of a limited number of
+# concurrent-position slots for a few cents of maximum possible gain.
+# Momentum-specific, deliberately: tennis has shown real net gains
+# including its own small trades, so left completely untouched here.
+# $1.00 is a first guess, not yet calibrated against real fire-rate data --
+# watch and adjust, same as every other threshold.
+MOMENTUM_MIN_TRADE_SIZE_DOLLARS = 1.00
 # Caps how many strikes of the SAME underlying window (e.g. all
 # KXBTCD-26SEP2217-T* strikes share one window) can be held simultaneously.
 # Multiple strikes of one window are NOT diversified risk -- they're the

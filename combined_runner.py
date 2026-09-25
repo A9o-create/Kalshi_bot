@@ -618,105 +618,116 @@ def _momentum_entry_scan(broker, already_signaled_events, cooldown_until):
         print(f"[warn] Coinbase BTC trend fetch failed, skipping this cycle: {e}")
         btc_trend = None
 
-        for series in config.CRYPTO_SERIES:
-            try:
-                markets = kmd.get_markets(series, status="open", limit=MOMENTUM_STRIKE_LADDER_FETCH_LIMIT)
-            except Exception as e:
-                print(f"[warn] couldn't fetch markets for {series}: {e}")
-                continue
-            if not markets or btc_trend is None:
-                continue
+    for series in config.CRYPTO_SERIES:
+        try:
+            markets = kmd.get_markets(series, status="open", limit=MOMENTUM_STRIKE_LADDER_FETCH_LIMIT)
+        except Exception as e:
+            print(f"[warn] couldn't fetch markets for {series}: {e}")
+            continue
+        if not markets or btc_trend is None:
+            continue
 
-            if series in LADDER_SERIES:
-                candidates = _select_strike_candidates(markets, btc_trend["current_price"])
-                if not candidates:
-                    print(f"[momentum diag] {series}: no parseable strike found in {len(markets)} markets, skipping")
-                    continue
+        if series in LADDER_SERIES:
+            candidates = _select_strike_candidates(markets, btc_trend["current_price"])
+            if not candidates:
+                print(f"[momentum diag] {series}: no parseable strike found in {len(markets)} markets, skipping")
+                continue
+        else:
+            # simple series (e.g. KXBTC15M): exactly one market per window,
+            # no strike to choose -- every open market is a direct candidate
+            candidates = markets
+
+        # the trend signal doesn't depend on which specific strike we're
+        # looking at -- check it once, not once per candidate
+        sig, diag = signals.detect_btc_trend_signal(btc_trend)
+        if diag.get("reason") != "signal_fired":
+            if diag.get("pct_change") is not None:
+                print(f"[momentum diag] {series}: coinbase_pct_change={diag['pct_change']*100:+.3f}% "
+                      f"(threshold {config.MOMENTUM_BTC_TREND_THRESHOLD_PCT*100:.2f}%) "
+                      f"direction={diag.get('direction')} reason={diag['reason']}")
             else:
-                # simple series (e.g. KXBTC15M): exactly one market per window,
-                # no strike to choose -- every open market is a direct candidate
-                candidates = markets
+                print(f"[momentum diag] {series}: reason={diag['reason']}")
+            continue
 
-            # the trend signal doesn't depend on which specific strike we're
-            # looking at -- check it once, not once per candidate
-            sig, diag = signals.detect_btc_trend_signal(btc_trend)
-            if diag.get("reason") != "signal_fired":
-                if diag.get("pct_change") is not None:
-                    print(f"[momentum diag] {series}: coinbase_pct_change={diag['pct_change']*100:+.3f}% "
-                          f"(threshold {config.MOMENTUM_BTC_TREND_THRESHOLD_PCT*100:.2f}%) "
-                          f"direction={diag.get('direction')} reason={diag['reason']}")
-                else:
-                    print(f"[momentum diag] {series}: reason={diag['reason']}")
+        # signal fired -- try each candidate strike nearest-to-farthest, falling
+        # through to the next one on ANY failure (already held, cooling down, thin
+        # liquidity, or blocked by try_open_position's own authoritative check --
+        # not just the cheap local pre-filter, which could in principle desync
+        # from the real broker state). Stops at the first successful open.
+        opened_position = None
+        attempted_any = False
+        for candidate in candidates:
+            cand_ticker = candidate["ticker"]
+            cand_event = _momentum_event_key(cand_ticker)
+            if cand_ticker in already_signaled_events:
+                continue
+            if cand_event in cooldown_until and time.time() < cooldown_until[cand_event]:
+                continue
+            attempted_any = True
+
+            window_key = _derive_match_key(cand_ticker)
+            in_window_count = _count_open_positions_in_window(broker, window_key)
+            if in_window_count >= config.MOMENTUM_MAX_POSITIONS_PER_WINDOW:
+                print(f"[momentum diag] {cand_ticker}: window {window_key} already has "
+                      f"{in_window_count} position(s) (max {config.MOMENTUM_MAX_POSITIONS_PER_WINDOW}), "
+                      f"trying next candidate")
                 continue
 
-            # signal fired -- try each candidate strike nearest-to-farthest, falling
-            # through to the next one on ANY failure (already held, cooling down, thin
-            # liquidity, or blocked by try_open_position's own authoritative check --
-            # not just the cheap local pre-filter, which could in principle desync
-            # from the real broker state). Stops at the first successful open.
-            opened_position = None
-            attempted_any = False
-            for candidate in candidates:
-                cand_ticker = candidate["ticker"]
-                cand_event = _momentum_event_key(cand_ticker)
-                if cand_ticker in already_signaled_events:
-                    continue
-                if cand_event in cooldown_until and time.time() < cooldown_until[cand_event]:
-                    continue
-                attempted_any = True
+            try:
+                ob = kmd.get_orderbook(cand_ticker)
+                available = ob["best_yes_ask_size"] if sig.direction == "yes" else ob["best_no_ask_size"]
+            except Exception as e:
+                print(f"[warn] orderbook check failed for {cand_ticker}, trying next candidate: {e}")
+                continue
+            if available < config.MOMENTUM_MIN_LIQUIDITY_CONTRACTS:
+                print(f"[momentum diag] {cand_ticker}: signal fired but liquidity too thin "
+                      f"({available:.0f} < {config.MOMENTUM_MIN_LIQUIDITY_CONTRACTS} contracts), trying next candidate")
+                continue
 
-                window_key = _derive_match_key(cand_ticker)
-                in_window_count = _count_open_positions_in_window(broker, window_key)
-                if in_window_count >= config.MOMENTUM_MAX_POSITIONS_PER_WINDOW:
-                    print(f"[momentum diag] {cand_ticker}: window {window_key} already has "
-                          f"{in_window_count} position(s) (max {config.MOMENTUM_MAX_POSITIONS_PER_WINDOW}), "
-                          f"trying next candidate")
-                    continue
+            now = int(time.time())
+            start_ts = now - MOMENTUM_CANDLE_LOOKBACK_MINUTES * 60
+            try:
+                candles = kmd.get_candlesticks(series, cand_ticker, start_ts, now, period_interval=1)
+            except Exception as e:
+                print(f"[warn] candlesticks failed for {cand_ticker}: {e}")
+                continue
 
-                try:
-                    ob = kmd.get_orderbook(cand_ticker)
-                    available = ob["best_yes_ask_size"] if sig.direction == "yes" else ob["best_no_ask_size"]
-                except Exception as e:
-                    print(f"[warn] orderbook check failed for {cand_ticker}, trying next candidate: {e}")
-                    continue
-                if available < config.MOMENTUM_MIN_LIQUIDITY_CONTRACTS:
-                    print(f"[momentum diag] {cand_ticker}: signal fired but liquidity too thin "
-                          f"({available:.0f} < {config.MOMENTUM_MIN_LIQUIDITY_CONTRACTS} contracts), trying next candidate")
-                    continue
+            current_price = candles[-1]["price_cents"] if candles else 50.0
+            side_price = current_price if sig.direction == "yes" else (100 - current_price)
+            win_prob = 0.5 + (sig.strength * 0.15)
+            size = risk.position_size_dollars(
+                broker.balance, win_prob,
+                config.MOMENTUM_TAKE_PROFIT_CENTS, config.MOMENTUM_STOP_LOSS_CENTS,
+                side_price_cents=side_price, market_title=candidate.get("title", cand_ticker),
+            )
+            size = _apply_depth_cap(cand_ticker, sig.direction, side_price, size)
+            if size <= 0:
+                continue
+            if size < config.MOMENTUM_MIN_TRADE_SIZE_DOLLARS:
+                # Skip, don't inflate -- a tiny Kelly-sized trade reflects
+                # genuinely low confidence in this specific signal, and
+                # forcing it up to some minimum would distort that on
+                # purpose. Momentum-specific: tennis (value_entry/
+                # favorite_entry/reversion) has shown real net gains
+                # including its own small trades, so left completely
+                # untouched rather than risk disrupting what's working there.
+                print(f"[momentum diag] {cand_ticker}: signal fired but size (${size:.2f}) is below "
+                      f"the ${config.MOMENTUM_MIN_TRADE_SIZE_DOLLARS:.2f} minimum, trying next candidate")
+                continue
 
-                now = int(time.time())
-                start_ts = now - MOMENTUM_CANDLE_LOOKBACK_MINUTES * 60
-                try:
-                    candles = kmd.get_candlesticks(series, cand_ticker, start_ts, now, period_interval=1)
-                except Exception as e:
-                    print(f"[warn] candlesticks failed for {cand_ticker}: {e}")
-                    continue
+            opened = broker.try_open_position(cand_ticker, cand_event, sig.direction, current_price, size,
+                                               sig.reason, strategy="momentum", market_title=candidate.get("title", cand_ticker))
+            if opened:
+                already_signaled_events.add(cand_ticker)
+                opened_position = opened
+                break  # successfully opened -- stop trying further candidates this cycle
 
-                current_price = candles[-1]["price_cents"] if candles else 50.0
-                side_price = current_price if sig.direction == "yes" else (100 - current_price)
-                win_prob = 0.5 + (sig.strength * 0.15)
-                size = risk.position_size_dollars(
-                    broker.balance, win_prob,
-                    config.MOMENTUM_TAKE_PROFIT_CENTS, config.MOMENTUM_STOP_LOSS_CENTS,
-                    side_price_cents=side_price, market_title=candidate.get("title", cand_ticker),
-                )
-                size = _apply_depth_cap(cand_ticker, sig.direction, side_price, size)
-                if size <= 0:
-                    continue
-
-                opened = broker.try_open_position(cand_ticker, cand_event, sig.direction, current_price, size,
-                                                   sig.reason, strategy="momentum", market_title=candidate.get("title", cand_ticker))
-                if opened:
-                    already_signaled_events.add(cand_ticker)
-                    opened_position = opened
-                    break  # successfully opened -- stop trying further candidates this cycle
-
-            if sig and opened_position is None and not attempted_any:
-                # every candidate was blocked by the cheap local pre-filter before
-                # even being attempted -- explicit diagnostic instead of the silent
-                # skip that hid this for hours on Sep 21
-                print(f"[momentum diag] {series}: signal fired but all {len(candidates)} "
-                      f"candidate strikes already held or cooling down, skipping this cycle")
+        if sig and opened_position is None and not attempted_any:
+            # every candidate was blocked by the cheap local pre-filter before
+            # even being attempted -- explicit diagnostic instead of the silent
+            # skip that hid this for hours on Sep 21
+            print(f"[momentum diag] {series}: signal fired but all {len(candidates)} "
+                  f"candidate strikes already held or cooling down, skipping this cycle")
 
 
 def run():
