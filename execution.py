@@ -571,20 +571,19 @@ class KalshiLiveBroker:
             # whether omitting this field doesn't actually default to the
             # primary subaccount the way the docs describe.
             "subaccount": 0,
-            # Explicit, not omitted -- confirmed via the real balance breakdown
-            # logged on this exact startup: total $150.01 is split across FOUR
-            # exchange_index shards (0: $135.73, 1: $0.00, 2: $11.64, 3: $2.64).
-            # The schema says this "auto-routes when ticker is provided" if
-            # omitted -- but every order attempt so far has failed with
-            # insufficient_balance despite tiny order sizes against a genuinely
-            # funded account, which is exactly what you'd see if auto-routing
-            # were sending tennis/BTC orders to the empty shard (index 1)
-            # instead of index 0, where the bulk of the real funds actually sit.
-            "exchange_index": 0,
         }
+        # exchange_index deliberately OMITTED (Sep 25): explicitly forcing it
+        # to 0 fixed insufficient_balance (confirmed -- that error stopped
+        # appearing entirely), but immediately produced a DIFFERENT error,
+        # market_not_found, on the very next real order -- this specific
+        # ticker apparently isn't hosted on shard 0. Different markets are
+        # evidently routed to different shards, and the schema's own
+        # "auto-routes when ticker is provided" was correct all along. The
+        # real fix was subaccount alone; forcing exchange_index was an
+        # over-correction that broke a different, working code path.
         implied_cost = count * (yes_price_cents / 100.0)
         print(f"[LIVE] order request: {ticker} side={book_side} count={body['count']} "
-              f"price={body['price']} subaccount={body['subaccount']} exchange_index={body['exchange_index']} "
+              f"price={body['price']} subaccount={body['subaccount']} "
               f"implied_cost=${implied_cost:.2f} current_balance=${self.balance:.2f}")
         result = self._request("POST", "/trade-api/v2/portfolio/events/orders", json_body=body)
         return result.get("order_id")
