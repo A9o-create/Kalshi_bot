@@ -54,7 +54,16 @@ KALSHI_PRIVATE_KEY_PATH_ENV = "KALSHI_PRIVATE_KEY_PATH"
 # per window (no ladder, no strike to pick) -- combined_runner.py treats
 # it as a simple series, completely separate code path from KXBTCD's
 # strike-selection logic.
-CRYPTO_SERIES = ["KXBTCD", "KXBTC15M"]
+CRYPTO_SERIES = ["KXBTC15M", "KXBTCD"]  # KXBTC15M listed first (Sep 26) so it gets
+                                          # first claim on the shared concurrency cap's
+                                          # remaining slot(s) each entry-scan cycle --
+                                          # _momentum_entry_scan() in combined_runner.py
+                                          # iterates this list in order under the same
+                                          # cap both series draw from, so whichever comes
+                                          # first wins ties when the cap (not liquidity or
+                                          # signal strength) is the binding constraint.
+                                          # No change to sizing, thresholds, or exposure
+                                          # limits -- this only reorders scan priority.
 # KXITFWMATCH confirmed live/active against Kalshi's real market data.
 # KXITFMMATCH (men's) follows the same naming convention as the confirmed
 # tickers (KXATPMATCH/KXWTAMATCH -> KXITFWMATCH for women) but is INFERRED,
