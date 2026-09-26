@@ -22,6 +22,16 @@ class Signal:
     strength: float = 1.0  # 0-1, how strong the signal is (used for Kelly edge estimate)
 
 
+# TODO (confirmed dead Sep 26, left in place on purpose for now -- see
+# detect_btc_trend_signal's docstring below for why this was superseded):
+# combined_runner.py never calls detect_momentum_signal -- checked every
+# signals.* call site in _momentum_entry_scan and _tennis_entry_scan, only
+# detect_btc_trend_signal, detect_reversion_signal, detect_favorite_entry_signal,
+# and detect_value_entry_signal are actually invoked. This function and the
+# four config constants it reads (MOMENTUM_TRAILING_WINDOW_MINUTES,
+# MOMENTUM_CURRENT_WINDOW_MINUTES, MOMENTUM_VOLUME_SPIKE_MULTIPLE,
+# MOMENTUM_PRICE_MOVE_CENTS) can be deleted together whenever there's a
+# moment for a cleanup pass -- not urgent, doesn't affect anything running.
 def detect_momentum_signal(candles: List[dict], btc_direction: Optional[str] = None):
     """
     Leg 1: volume spike + price move together, in the same direction.

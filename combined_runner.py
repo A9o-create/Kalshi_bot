@@ -162,17 +162,31 @@ def _market_age_seconds(trades: list) -> float:
     return time.time() - trades[0]["ts"]
 
 
-def _closes_today(market: dict) -> bool:
+def _closes_soon(market: dict) -> bool:
     """
-    True if a market's close_time falls on today's calendar date (UTC).
-    Added Sep 25 specifically for tennis, after a real position was opened
-    on a match that doesn't close until the next day -- meaning it would
-    sit open overnight through the shakedown period, undesirable while the
-    account is still being validated.
+    True if a market's close_time is between now and
+    config.TENNIS_MAX_HOURS_UNTIL_CLOSE hours from now. Added Sep 25
+    (originally as _closes_today, a same-UTC-calendar-day check) specifically
+    for tennis, after a real position was opened on a match that doesn't
+    close until the next day -- meaning it would sit open overnight through
+    the shakedown period, undesirable while the account is still being
+    validated.
 
-    Checks close_time only, not open_time -- the concern is specifically
-    about not holding a position overnight, and close_time alone fully
-    determines that regardless of when the market happened to open.
+    Rewritten Sep 26 to check duration-until-close instead of calendar date:
+    the same-UTC-day version excluded a live, in-progress Alcaraz-Fritz ATP
+    match entirely (zero log output for it -- it never reached the
+    per-market loop) because its close_time fell after 8 PM ET, i.e. past
+    midnight UTC, "tomorrow" by that check even though the match was
+    genuinely happening right now. The actual goal -- don't hold a position
+    overnight -- only cares how far away close_time is, not what calendar
+    date it lands on, so this version isn't sensitive to what timezone the
+    match is scheduled in or where UTC midnight happens to fall relative to
+    it.
+
+    Excludes already-closed markets (close_time in the past) as well as ones
+    too far out. Checks close_time only, not open_time -- close_time alone
+    fully determines how long a position could be held, regardless of when
+    the market happened to open.
 
     Field confirmed against Kalshi's own documented Market schema
     (close_time, ISO 8601). A missing or unparseable timestamp is excluded
@@ -185,8 +199,8 @@ def _closes_today(market: dict) -> bool:
         close_dt = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return False
-    today_utc = datetime.now(timezone.utc).date()
-    return close_dt.date() == today_utc
+    hours_until_close = (close_dt - datetime.now(timezone.utc)).total_seconds() / 3600
+    return 0 <= hours_until_close <= config.TENNIS_MAX_HOURS_UNTIL_CLOSE
 
 
 def _parse_strike_threshold(ticker: str):
@@ -427,7 +441,7 @@ def _tennis_entry_scan(broker, already_signaled_events, cooldown_until):
             # a real position was opened on a match that doesn't close until
             # the next day, leaving it open overnight. Applied before any
             # strategy gets a chance to evaluate the market at all.
-            markets = [m for m in markets if _closes_today(m)]
+            markets = [m for m in markets if _closes_soon(m)]
 
             for m in markets:
                 ticker = m["ticker"]
