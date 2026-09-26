@@ -33,7 +33,10 @@ import time
 import signal as os_signal
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 import config
 import signals
@@ -164,29 +167,39 @@ def _market_age_seconds(trades: list) -> float:
 
 def _closes_soon(market: dict) -> bool:
     """
-    True if a market's close_time is between now and
-    config.TENNIS_MAX_HOURS_UNTIL_CLOSE hours from now. Added Sep 25
-    (originally as _closes_today, a same-UTC-calendar-day check) specifically
-    for tennis, after a real position was opened on a match that doesn't
-    close until the next day -- meaning it would sit open overnight through
-    the shakedown period, undesirable while the account is still being
-    validated.
+    True if a market's close_time falls on today's calendar date in
+    US/Eastern. Added Sep 25 (originally as _closes_today, a same-day check
+    in UTC) specifically for tennis, after a real position was opened on a
+    match that doesn't close until the next day -- meaning it would sit
+    open overnight through the shakedown period, undesirable while the
+    account is still being validated.
 
-    Rewritten Sep 26 to check duration-until-close instead of calendar date:
-    the same-UTC-day version excluded a live, in-progress Alcaraz-Fritz ATP
-    match entirely (zero log output for it -- it never reached the
-    per-market loop) because its close_time fell after 8 PM ET, i.e. past
-    midnight UTC, "tomorrow" by that check even though the match was
-    genuinely happening right now. The actual goal -- don't hold a position
-    overnight -- only cares how far away close_time is, not what calendar
-    date it lands on, so this version isn't sensitive to what timezone the
-    match is scheduled in or where UTC midnight happens to fall relative to
-    it.
+    Went through two revisions on Sep 26, same underlying bug both times --
+    checking "today" against the wrong reference point:
+      1. UTC same-day excluded a live, in-progress Alcaraz-Fritz ATP match
+         entirely (zero log output -- it never reached the per-market loop)
+         because its close_time fell after 8 PM ET, past midnight UTC,
+         "tomorrow" by that check even though the match was genuinely
+         happening right now.
+      2. Replaced with a fixed 8-hour window, which turned out to have the
+         same failure mode one level down: if Kalshi sets a generous
+         "end of day" close_time rather than the actual expected match end
+         (plausible, unconfirmed), an ET midnight cutoff checked at ~4 PM ET
+         is ~8 hours out -- right at the edge of an arbitrarily-chosen
+         window, for the same underlying reason as revision 1.
+    Rather than guess a bigger number and risk hitting the same wall further
+    out, this checks the calendar day directly again, but anchored to
+    US/Eastern instead of UTC -- the one dated-anchoring convention this
+    codebase actually has evidence for (KXBTCD confirmed closing at 9 AM
+    and 5 PM EDT, not round UTC hours). ASSUMPTION, not confirmed: that
+    tennis markets follow the same ET-anchored convention BTC daily markets
+    do. If that turns out false, this can fail the same way revision 1 did,
+    just relative to a different timezone's midnight -- worth a real
+    close_time data point to confirm outright if this mismatches again.
 
-    Excludes already-closed markets (close_time in the past) as well as ones
-    too far out. Checks close_time only, not open_time -- close_time alone
-    fully determines how long a position could be held, regardless of when
-    the market happened to open.
+    Checks close_time only, not open_time -- close_time alone fully
+    determines how long a position could be held, regardless of when the
+    market happened to open.
 
     Field confirmed against Kalshi's own documented Market schema
     (close_time, ISO 8601). A missing or unparseable timestamp is excluded
@@ -199,8 +212,16 @@ def _closes_soon(market: dict) -> bool:
         close_dt = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return False
-    hours_until_close = (close_dt - datetime.now(timezone.utc)).total_seconds() / 3600
-    return 0 <= hours_until_close <= config.TENNIS_MAX_HOURS_UNTIL_CLOSE
+    # Subtract a second before taking the date: a close_time of exactly
+    # 00:00:00 ET is naturally "the end of today" in any normal reading (a
+    # generous end-of-day cutoff), but .date() on that exact instant returns
+    # TOMORROW's calendar date -- the same boundary bug this function exists
+    # to avoid, just relocated to ET midnight instead of UTC midnight. Caught
+    # by testing this exact scenario (a generous midnight-ET close_time)
+    # before trusting this fix.
+    today_et = datetime.now(_ET).date()
+    close_et_date = (close_dt - timedelta(seconds=1)).astimezone(_ET).date()
+    return close_et_date == today_et
 
 
 def _parse_strike_threshold(ticker: str):

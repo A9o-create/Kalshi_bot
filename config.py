@@ -72,21 +72,6 @@ CRYPTO_SERIES = ["KXBTC15M", "KXBTCD"]  # KXBTC15M listed first (Sep 26) so it g
 # as a [warn] and skips -- watch the first few poll cycles' logs to confirm.
 TENNIS_SERIES = ["KXATPMATCH", "KXWTAMATCH", "KXITFWMATCH", "KXITFMMATCH"]
 
-# Max hours from now until a tennis market's close_time for _tennis_entry_scan
-# to consider it at all -- the actual goal (don't hold a position overnight
-# during the live_prod shakedown) doesn't care what calendar date close_time
-# falls on, only how far away it is. Replaces an earlier "closes on today's
-# UTC calendar date" check (added Sep 25) that broke on Sep 26: an
-# Alcaraz-Fritz ATP match already in progress, clearly "today" by any normal
-# reading, was silently excluded from the entire scan because its close_time
-# landed after 8 PM ET -- i.e. past midnight UTC, "tomorrow" by that check's
-# math, even though the match itself was live right now. A duration-based
-# window sidesteps that boundary entirely regardless of what timezone the
-# match is actually scheduled in. Set to 8h (upper end of a 6-8h range) to
-# err toward not missing another live match the way this one got missed;
-# tune down toward 6h later if it proves too loose.
-TENNIS_MAX_HOURS_UNTIL_CLOSE = 8
-
 # --- Leg 1: Crypto momentum ---
 # TODO (confirmed dead Sep 26, left in place on purpose for now): these next
 # 4 constants are only read by signals.detect_momentum_signal(), which
