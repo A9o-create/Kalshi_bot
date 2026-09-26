@@ -351,7 +351,7 @@ def tennis_loop(broker):
                 if is_settled:
                     close_price = resolved_price if resolved_price is not None else current_price
                     print(f"[exit] {pos.ticker} ({pos.strategy}): market_settled (closing at {close_price:.0f}c)")
-                    broker.close_position(pos.ticker, close_price)
+                    broker.close_position(pos.ticker, close_price, force=True)
                     already_signaled_events.discard(pos.ticker)
                     cooldown_until[pos.event_ticker] = time.time() + config.REENTRY_COOLDOWN_SECONDS
                     should_halt, halt_reason = _should_halt(broker)
@@ -550,7 +550,7 @@ def momentum_loop(broker):
                 if is_settled:
                     close_price = resolved_price if resolved_price is not None else current_price
                     print(f"[exit] {pos.ticker} ({pos.strategy}): market_settled (closing at {close_price:.0f}c)")
-                    broker.close_position(pos.ticker, close_price)
+                    broker.close_position(pos.ticker, close_price, force=True)
                     already_signaled_events.discard(pos.ticker)
                     cooldown_until[pos.event_ticker] = time.time() + config.REENTRY_COOLDOWN_SECONDS
                     should_halt, halt_reason = _should_halt(broker)

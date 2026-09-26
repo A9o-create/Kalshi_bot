@@ -13,6 +13,30 @@ import config
 import kalshi_market_data
 import risk
 
+# After this many consecutive close attempts fill 0 contracts (no liquidity
+# to sell into, even at the price floor), close_position() stops
+# automatically retrying for that ticker rather than resubmitting an order
+# every exit-check cycle forever. Chosen Sep 26 after a stuck position kept
+# retrying for 40+ minutes straight with zero fills. Module-level (not a
+# class attribute) so both PaperBroker and KalshiLiveBroker, plus
+# _counts_toward_cap() below, share one definition.
+MAX_CONSECUTIVE_FAILED_CLOSES = 10
+
+
+def _counts_toward_cap(pos) -> bool:
+    """
+    Whether an open position should count against MAX_CONCURRENT_POSITIONS.
+    False only for a position that's given up retrying its close (hit
+    MAX_CONSECUTIVE_FAILED_CLOSES) -- added alongside the backoff itself:
+    the backoff stops it from resubmitting orders, but without this it would
+    still occupy a concurrency slot indefinitely purely because it can't
+    find an exit, silently reducing the effective cap for both loops for as
+    long as it takes to settle. Every other status (open, pending_fill,
+    closing) still counts -- those represent a real, live commitment,
+    just not the "gave up, permanently stuck open" case.
+    """
+    return pos.consecutive_failed_closes < MAX_CONSECUTIVE_FAILED_CLOSES
+
 
 def kalshi_taker_fee_dollars(contracts: int, price_cents: float) -> float:
     """
@@ -64,6 +88,19 @@ class Position:
     # entry rather than a fixed distance from entry. None until the first
     # exit-check updates it (initialized to entry price at that point).
     peak_side_price_cents: Optional[float] = None
+    # Counts consecutive close attempts that filled ZERO contracts (e.g. no
+    # bid-side liquidity to sell into, even at the price floor). Reset to 0
+    # on any fill (full or partial). Once it hits
+    # MAX_CONSECUTIVE_FAILED_CLOSES (module-level constant), close_position() stops
+    # retrying automatically for THIS ticker -- added Sep 26 after a
+    # momentum position (KXBTCD-26SEP2617-T89249.99) got stuck re-triggering
+    # stop_loss and resubmitting orders every cycle for 40+ minutes with zero
+    # fills, the whole time still occupying a slot against
+    # MAX_CONCURRENT_POSITIONS (the global cap counts ALL statuses, not just
+    # "open"), so it was also blocking one concurrent slot from either loop.
+    # Doesn't apply to settlement-triggered closes -- see close_position's
+    # `force` parameter.
+    consecutive_failed_closes: int = 0
 
 
 class PaperBroker:
@@ -144,8 +181,9 @@ class PaperBroker:
         need to call can_open_new_position() separately beforehand.
         """
         with self._lock:
-            open_count = len(self.open_positions)
-            open_events = {p.event_ticker for p in self.open_positions.values()}
+            counted = [p for p in self.open_positions.values() if _counts_toward_cap(p)]
+            open_count = len(counted)
+            open_events = {p.event_ticker for p in counted}
             allowed, _reason = risk.can_open_new_position(open_count, open_events, event_ticker)
             if not allowed:
                 return None
@@ -981,8 +1019,9 @@ class KalshiLiveBroker:
             status="pending_fill",
         )
         with self._lock:
-            open_count = len(self.open_positions)
-            open_events = {p.event_ticker for p in self.open_positions.values()}
+            counted = [p for p in self.open_positions.values() if _counts_toward_cap(p)]
+            open_count = len(counted)
+            open_events = {p.event_ticker for p in counted}
             allowed, _reason = risk.can_open_new_position(open_count, open_events, event_ticker)
             if not allowed:
                 return None
@@ -1047,7 +1086,7 @@ class KalshiLiveBroker:
             pos.size_dollars = filled * (weighted_price / 100.0)
             pos.status = "open"
 
-    def close_position(self, ticker: str, exit_price_cents: float) -> bool:
+    def close_position(self, ticker: str, exit_price_cents: float, force: bool = False) -> bool:
         """
         Same maker-first-then-taker-fallback pattern as open_position, and
         the same non-blocking reservation approach: marks the position
@@ -1055,9 +1094,18 @@ class KalshiLiveBroker:
         the actual fill sequence in a background thread.
 
         Returns True if a close attempt was started, False if there was
-        nothing to close (no such position, or already closing/pending).
+        nothing to close (no such position, already closing/pending, or
+        blocked by the consecutive-failed-close backoff below).
         P&L applies asynchronously once the fill resolves -- check
         broker.daily_pnl or broker.balance after giving it a moment.
+
+        force=True bypasses the backoff (but NOT the closing/pending_fill
+        guards -- those still protect against double-submission). Pass this
+        from market-settlement close calls: settlement is an authoritative
+        signal to exit regardless of how many prior stop_loss/take_profit
+        retries have failed, so it shouldn't be silently swallowed by a
+        backoff that exists specifically to stop hammering the order
+        endpoint on price-triggered retries.
         """
         with self._lock:
             pos = self.open_positions.get(ticker)
@@ -1065,6 +1113,8 @@ class KalshiLiveBroker:
                 return False
             if pos.status == "pending_fill":
                 print(f"[LIVE] {ticker} order still filling, can't close yet -- try again shortly")
+                return False
+            if not force and pos.consecutive_failed_closes >= MAX_CONSECUTIVE_FAILED_CLOSES:
                 return False
             pos.status = "closing"
             contracts_to_sell = pos.filled_contracts
@@ -1098,9 +1148,18 @@ class KalshiLiveBroker:
             return
 
         if closed_contracts == 0:
-            print(f"[LIVE] close for {ticker} filled 0 contracts -- still open, retry")
             with self._lock:
                 pos.status = "open"
+                pos.consecutive_failed_closes += 1
+                count = pos.consecutive_failed_closes
+            if count >= MAX_CONSECUTIVE_FAILED_CLOSES:
+                print(f"[warn] {ticker}: {count} consecutive close attempts filled 0 contracts "
+                      f"(no bid-side liquidity even at the price floor) -- pausing automatic exit "
+                      f"retries for this position. It will still close on market settlement or "
+                      f"needs manual intervention in the meantime.")
+            else:
+                print(f"[LIVE] close for {ticker} filled 0 contracts -- still open, retry "
+                      f"({count}/{MAX_CONSECUTIVE_FAILED_CLOSES} before backing off)")
             return
 
         # P&L: proceeds minus cost, per contract, linear in price -- see
@@ -1121,6 +1180,7 @@ class KalshiLiveBroker:
                 pos.filled_contracts = remaining
                 pos.size_dollars = remaining * (pos.entry_price_cents / 100.0)
                 pos.status = "open"
+                pos.consecutive_failed_closes = 0  # got a real fill -- liquidity exists, reset the backoff
             else:
                 self.open_positions.pop(ticker, None)
 
