@@ -440,11 +440,25 @@ class KalshiLiveBroker:
                 if cursor:
                     params["cursor"] = cursor
                 data = self._request("GET", "/trade-api/v2/portfolio/positions", params=params)
+                print(f"[LIVE] raw positions response (exchange_index={exchange_index}): {data}")
 
                 for mp in data.get("market_positions", []):
+                    # Sep 26: checking BOTH position (int) and position_fp
+                    # (fixed-point string) -- the exact same dual-field
+                    # pattern that caused real bugs today in _get_order
+                    # (fill_count/fill_count_fp) and elsewhere. If
+                    # `position` reads 0 while `position_fp` is genuinely
+                    # non-zero, trusting `position` alone would silently
+                    # skip a real, held position -- prefer whichever field
+                    # is actually populated and non-zero.
                     net_contracts = mp.get("position", 0)
+                    if net_contracts == 0 and "position_fp" in mp:
+                        try:
+                            net_contracts = float(mp["position_fp"])
+                        except (ValueError, TypeError):
+                            pass
                     if net_contracts == 0:
-                        continue  # flat -- nothing actually held on this ticker
+                        continue  # genuinely flat -- nothing actually held on this ticker
 
                     ticker = mp["ticker"]
                     direction = "yes" if net_contracts > 0 else "no"
@@ -452,7 +466,7 @@ class KalshiLiveBroker:
                     total_traded_dollars = float(mp.get("total_traded_dollars", 0) or 0)
                     entry_price_cents = (total_traded_dollars / total_traded * 100.0) if total_traded > 0 else 50.0
                     size_dollars = abs(float(mp.get("market_exposure_dollars", 0) or 0))
-                    filled_contracts = abs(net_contracts)
+                    filled_contracts = int(round(abs(net_contracts)))
 
                     series = ticker.split("-")[0]
                     if series in config.CRYPTO_SERIES:
