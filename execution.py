@@ -422,53 +422,65 @@ class KalshiLiveBroker:
         this path, not a guarantee it behaves correctly.
         """
         positions_synced = []
-        cursor = None
-        while True:
-            params = {"limit": 1000}
-            if cursor:
-                params["cursor"] = cursor
-            data = self._request("GET", "/trade-api/v2/portfolio/positions", params=params)
+        for exchange_index in self.FUNDED_EXCHANGE_INDICES:
+            # THE REAL BUG, found Sep 26: this loop used to query only the
+            # default shard (0), with no exchange_index parameter at all.
+            # It was built early in the session, before the shard-specific
+            # pattern was discovered for balance, order creation, order
+            # status, and fills -- this exact same pattern applies here
+            # too, and this method was simply never updated. Concretely:
+            # a real, confirmed BTCD position and a real, confirmed tennis
+            # position (Wong vs Vallejo) were sitting open on shards 2 and
+            # 3, completely invisible to this sync, which only ever
+            # checked shard 0 -- meaning neither position was ever brought
+            # under this bot's exit-check management after opening.
+            cursor = None
+            while True:
+                params = {"limit": 1000, "exchange_index": exchange_index}
+                if cursor:
+                    params["cursor"] = cursor
+                data = self._request("GET", "/trade-api/v2/portfolio/positions", params=params)
 
-            for mp in data.get("market_positions", []):
-                net_contracts = mp.get("position", 0)
-                if net_contracts == 0:
-                    continue  # flat -- nothing actually held on this ticker
+                for mp in data.get("market_positions", []):
+                    net_contracts = mp.get("position", 0)
+                    if net_contracts == 0:
+                        continue  # flat -- nothing actually held on this ticker
 
-                ticker = mp["ticker"]
-                direction = "yes" if net_contracts > 0 else "no"
-                total_traded = mp.get("total_traded", 0)
-                total_traded_dollars = float(mp.get("total_traded_dollars", 0) or 0)
-                entry_price_cents = (total_traded_dollars / total_traded * 100.0) if total_traded > 0 else 50.0
-                size_dollars = abs(float(mp.get("market_exposure_dollars", 0) or 0))
-                filled_contracts = abs(net_contracts)
+                    ticker = mp["ticker"]
+                    direction = "yes" if net_contracts > 0 else "no"
+                    total_traded = mp.get("total_traded", 0)
+                    total_traded_dollars = float(mp.get("total_traded_dollars", 0) or 0)
+                    entry_price_cents = (total_traded_dollars / total_traded * 100.0) if total_traded > 0 else 50.0
+                    size_dollars = abs(float(mp.get("market_exposure_dollars", 0) or 0))
+                    filled_contracts = abs(net_contracts)
 
-                series = ticker.split("-")[0]
-                if series in config.CRYPTO_SERIES:
-                    strategy = "momentum"
-                    event_ticker = ticker  # per-strike granularity, matches _momentum_event_key
-                else:
-                    strategy = "resynced_unknown"
-                    event_ticker = ticker.rsplit("-", 1)[0] if "-" in ticker else ticker  # matches _derive_match_key
+                    series = ticker.split("-")[0]
+                    if series in config.CRYPTO_SERIES:
+                        strategy = "momentum"
+                        event_ticker = ticker  # per-strike granularity, matches _momentum_event_key
+                    else:
+                        strategy = "resynced_unknown"
+                        event_ticker = ticker.rsplit("-", 1)[0] if "-" in ticker else ticker  # matches _derive_match_key
 
-                pos = Position(
-                    ticker=ticker,
-                    event_ticker=event_ticker,
-                    direction=direction,
-                    entry_price_cents=entry_price_cents,
-                    size_dollars=size_dollars,
-                    opened_ts=time.time(),  # real open time not available from this endpoint -- treated as "now"
-                    reason="resynced from Kalshi on startup",
-                    strategy=strategy,
-                    market_title="",  # not returned by this endpoint
-                    filled_contracts=filled_contracts,
-                    status="open",
-                )
-                self.open_positions[ticker] = pos
-                positions_synced.append(pos)
+                    pos = Position(
+                        ticker=ticker,
+                        event_ticker=event_ticker,
+                        direction=direction,
+                        entry_price_cents=entry_price_cents,
+                        size_dollars=size_dollars,
+                        opened_ts=time.time(),  # real open time not available from this endpoint -- treated as "now"
+                        reason="resynced from Kalshi on startup",
+                        strategy=strategy,
+                        market_title="",  # not returned by this endpoint
+                        filled_contracts=filled_contracts,
+                        status="open",
+                    )
+                    self.open_positions[ticker] = pos
+                    positions_synced.append(pos)
 
-            cursor = data.get("cursor")
-            if not cursor:
-                break
+                cursor = data.get("cursor")
+                if not cursor:
+                    break
 
         if positions_synced:
             print(f"[LIVE] Re-synced {len(positions_synced)} real open position(s) from Kalshi on startup:")
