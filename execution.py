@@ -658,20 +658,53 @@ class KalshiLiveBroker:
 
     # --- order fill polling ---
 
+    def _get_total_filled(self, order_id: str, exchange_index: int = 0) -> float:
+        """
+        Returns the TRUE total filled count for an order, queried via
+        GET /portfolio/fills -- NOT the orders-list endpoint. Added Sep 26
+        after a real, confirmed missed fill: a genuine $3.52 BTC15M trade
+        that filled and paid out $4.00 was reported by our own polling as
+        "filled 0 contracts," directly costing us knowledge of a real,
+        profitable position -- and very possibly explains other real
+        positions (2 KXBTCD) visible in the actual Kalshi account that
+        this bot has no record of at all.
+
+        Root cause, confirmed via Kalshi's own docs: "Resting orders will
+        always be available [via GET /portfolio/orders]. Orders that have
+        been canceled or fully executed... are only available via
+        GET /historical/orders." A taker order that fills instantly --
+        exactly what our taker fallback is designed to do -- can disappear
+        from the resting-orders list almost immediately. GET
+        /portfolio/fills returns actual fill records instead: ground
+        truth regardless of whether the order is still resting, already
+        fully executed, or has dropped off the live orders list entirely.
+
+        Sums count_fp across every fill matching this order_id, since a
+        single order can fill in multiple partial fills.
+        """
+        data = self._request("GET", "/trade-api/v2/portfolio/fills", params={"exchange_index": exchange_index})
+        total = 0.0
+        for fill in data.get("fills", []):
+            if fill.get("order_id") == order_id:
+                total += float(fill.get("count_fp", 0))
+        return total
+
     def _get_order(self, order_id: str, exchange_index: int = 0) -> dict:
         """
         Finds a specific order's current state via the LIST endpoint
         (GET /portfolio/orders?exchange_index=X), filtering for our
-        order_id client-side -- NOT the single-order-by-id endpoint
-        (GET /portfolio/orders/{order_id}). Migrated Sep 25 after real
-        production data showed the singular endpoint 404ing consistently,
-        every single time, even with the correct exchange_index included
-        as a query parameter. Kalshi's own changelog confirms
-        exchange_index filtering was added specifically to the LIST
-        endpoints (GET /portfolio/orders, /portfolio/positions,
-        /portfolio/fills) -- not confirmed for the singular by-id lookup,
-        which appears to ignore it and always resolve against the default
-        shard regardless of what's passed.
+        order_id client-side.
+
+        Used ONLY as a secondary signal now (specifically: whether an
+        order is genuinely still resting, for cancel-on-timeout
+        decisions) -- NOT as the source of truth for fill count, which
+        comes from _get_total_filled() / GET /portfolio/fills instead.
+        This list only reliably shows RESTING orders per Kalshi's own
+        docs, and a real, fully-executed order can disappear from it
+        almost immediately -- treating an empty/not-found result here as
+        "0 filled" is exactly the bug that caused a real, confirmed
+        missed fill (see _get_total_filled's docstring). An empty result
+        from THIS method must never be interpreted as "nothing filled."
 
         Normalizes both possible field-naming conventions this session's
         research has found inconsistently documented across different
@@ -687,7 +720,9 @@ class KalshiLiveBroker:
                 if "remaining_count" not in normalized and "remaining_count_fp" in normalized:
                     normalized["remaining_count"] = int(float(normalized["remaining_count_fp"]))
                 return normalized
-        return {}  # not (yet) visible in this shard's order list
+        return {}  # not found here -- could mean never existed, still processing, OR
+                   # already fully executed and dropped off this list. NEVER treat
+                   # this as "0 filled" -- check _get_total_filled() for that.
 
     def _cancel_order(self, order_id: str, exchange_index: int = 0) -> dict:
         """
@@ -702,39 +737,59 @@ class KalshiLiveBroker:
         return self._request("DELETE", f"/trade-api/v2/portfolio/events/orders/{order_id}",
                               params={"exchange_index": exchange_index})
 
-    def _poll_until_filled_or_timeout(self, order_id: str, exchange_index: int = 0, timeout_seconds: float = None) -> dict:
+    def _poll_until_filled_or_timeout(self, order_id: str, exchange_index: int = 0, timeout_seconds: float = None,
+                                       requested_count: float = None) -> dict:
         """
-        Polls an order until it's fully filled or `timeout_seconds` elapses
-        (defaults to ORDER_FILL_TIMEOUT_SECONDS). If anything is still
-        resting at timeout, cancels the remainder so we don't leave a stale
-        order sitting on the book. Returns the final order state.
+        Polls GET /portfolio/fills (the ground-truth fill record -- see
+        _get_total_filled()) until the order is fully filled or
+        `timeout_seconds` elapses. If still short of `requested_count` at
+        timeout, checks the orders-list for whether it's genuinely still
+        resting and cancels it if so -- that list is used ONLY for this
+        resting-status check now, never to determine fill count.
+
+        `requested_count` lets this stop polling the instant enough fills
+        are found, rather than waiting out the full timeout on an order
+        that already completely filled. If not provided, always waits
+        the full timeout (safe default, just less responsive).
+
+        Returns {"fill_count": <float>, "remaining_count": <float>} --
+        deliberately simplified from the old full-order-object shape,
+        since fill count now comes from a different endpoint than order
+        status and there's no single "order object" combining both
+        anymore.
         """
         if timeout_seconds is None:
             timeout_seconds = config.ORDER_FILL_TIMEOUT_SECONDS
         deadline = time.time() + timeout_seconds
-        order = self._get_order(order_id, exchange_index)
+        filled = self._get_total_filled(order_id, exchange_index)
 
         while time.time() < deadline:
-            status = order.get("status")
-            remaining = order.get("remaining_count", 0)
-            if status in ("executed", "canceled") or remaining == 0:
+            if requested_count is not None and filled >= requested_count:
                 break
             time.sleep(config.ORDER_FILL_POLL_INTERVAL_SECONDS)
-            order = self._get_order(order_id, exchange_index)
+            filled = self._get_total_filled(order_id, exchange_index)
 
-        if order.get("remaining_count", 0) > 0 and order.get("status") not in ("executed", "canceled"):
-            fill_count_before_cancel = order.get("fill_count", 0)
-            print(f"[LIVE] order {order_id} still has {order['remaining_count']} resting after "
-                  f"{timeout_seconds}s, canceling remainder")
-            try:
-                self._cancel_order(order_id, exchange_index)
-            except Exception as e:
-                print(f"[warn] cancel failed for {order_id}: {e} -- check manually, it may still be resting")
-            order = self._get_order(order_id, exchange_index)
-            # some cancel responses lag on fill_count; trust the higher of the two reads
-            order["fill_count"] = max(order.get("fill_count", 0), fill_count_before_cancel)
+        remaining = (requested_count - filled) if requested_count is not None else None
+        if remaining is not None and remaining > 0:
+            # confirm via the orders-list whether it's genuinely still
+            # resting before canceling -- it may have already fully
+            # executed and simply not shown up as a fill record yet (a
+            # real timing gap, distinct from the "not found = 0 filled"
+            # bug this whole rebuild addresses: here absence is used to
+            # infer resting-status, never to infer fill count)
+            order_status = self._get_order(order_id, exchange_index)
+            if order_status.get("status") == "resting" or order_status.get("remaining_count", 0) > 0:
+                print(f"[LIVE] order {order_id} still has ~{remaining:.2f} unfilled after "
+                      f"{timeout_seconds}s, canceling remainder")
+                try:
+                    self._cancel_order(order_id, exchange_index)
+                except Exception as e:
+                    print(f"[warn] cancel failed for {order_id}: {e} -- check manually, it may still be resting")
+                # re-check fills once more in case anything filled during cancellation
+                filled = self._get_total_filled(order_id, exchange_index)
 
-        return order
+        final_remaining = max(0.0, (requested_count - filled)) if requested_count is not None else 0.0
+        return {"fill_count": filled, "remaining_count": final_remaining}
 
     def _place_order(self, ticker: str, side: str, action: str, count: int, price_cents: float, is_maker: bool):
         """
@@ -837,7 +892,9 @@ class KalshiLiveBroker:
         maker_order_id, maker_exchange_index = self._place_order(ticker, side, action, requested_contracts, maker_price_cents, is_maker=True)
         print(f"[LIVE] maker attempt: {ticker} {side} x{requested_contracts} @ {maker_price_cents:.0f}c, "
               f"order_id={maker_order_id}, exchange_index={maker_exchange_index}")
-        maker_final = self._poll_until_filled_or_timeout(maker_order_id, maker_exchange_index, timeout_seconds=config.MAKER_ATTEMPT_TIMEOUT_SECONDS)
+        maker_final = self._poll_until_filled_or_timeout(maker_order_id, maker_exchange_index,
+                                                           timeout_seconds=config.MAKER_ATTEMPT_TIMEOUT_SECONDS,
+                                                           requested_count=requested_contracts)
         maker_filled = maker_final.get("fill_count", 0)
 
         taker_filled = 0
@@ -848,7 +905,7 @@ class KalshiLiveBroker:
             else:
                 print(f"[LIVE] maker attempt filled 0, falling back to taker for all {remainder}")
             taker_order_id, taker_exchange_index = self._place_order(ticker, side, action, remainder, taker_price_cents, is_maker=False)
-            taker_final = self._poll_until_filled_or_timeout(taker_order_id, taker_exchange_index)
+            taker_final = self._poll_until_filled_or_timeout(taker_order_id, taker_exchange_index, requested_count=remainder)
             taker_filled = taker_final.get("fill_count", 0)
 
         total_filled = maker_filled + taker_filled
